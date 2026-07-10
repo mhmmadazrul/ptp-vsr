@@ -228,7 +228,7 @@ function renderPredict(tb) {
         <div class="iw"><input id="f-vessel" value="${f.vessel}" placeholder="e.g. EVER GIVEN" style="text-transform:uppercase"></div>
       </div>
       <div class="fi">
-        <label>QC number</label>
+        <label>QC number (Last Crane)</label>
         <div class="iw"><select id="f-qc" onchange="onQC(this.value)">
           <option value="">— select —</option>
           ${QC_DB.map(q => `<option value="${q.qc}" ${f.qc===q.qc?'selected':''}>${q.qc}</option>`).join('')}
@@ -256,7 +256,7 @@ function renderPredict(tb) {
         <div class="iw"><input id="f-f1" type="number" value="${f.f1||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
         <div id="hint-f1" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f1',1.0)}</div>
       </div>
-      <div class="fi"><label>Twin container</label>
+      <div class="fi"><label>Twin lift</label>
         <div class="iw"><input id="f-f2" type="number" value="${f.f2||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
         <div id="hint-f2" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f2',0.5)}</div>
       </div>
