@@ -558,7 +558,19 @@ window.doCalc = function() {
   const res = calcAll(f, +f.cmph, qc ? qc.speed : 50);
   const now = new Date();
   const lastLift = addMin(now, res.totalMin);
-  S.result = { ...res, lastLiftStr: toHM(lastLift), srtStr: toHM(lastLift) };
+
+// Round UP to nearest 15-min mark (stay if already on mark)
+function roundUpTo15(d) {
+  const mins = d.getHours() * 60 + d.getMinutes();
+  const remainder = mins % 15;
+  const roundedMins = remainder === 0 ? mins : mins + (15 - remainder);
+  const srt = new Date(d);
+  srt.setHours(Math.floor(roundedMins / 60), roundedMins % 60, 0, 0);
+  return srt;
+}
+
+const srtTime = roundUpTo15(lastLift);
+S.result = { ...res, lastLiftStr: toHM(lastLift), srtStr: toHM(srtTime) };
   renderTab();
   setTimeout(() => { const el = document.querySelector('.hrow'); if (el) el.scrollIntoView({ behavior:'smooth', block:'nearest' }); }, 100);
 };
