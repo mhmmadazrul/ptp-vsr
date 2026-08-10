@@ -18,20 +18,31 @@ async function loadQCDatabase() {
 const F = { f1:1.0, f2:0.5, f3:1.9157, f4:1.5326, f5:3.0651, f6:1.9157 };
 
 let S = {
-  tab: 'predict', recTab: 'pending',
+  tab: 'arrival',
   operator: localStorage.getItem('ptp_op') || '',
   records: [], loading: false,
-  form: { vessel:'', qc:'', cmph:'', f1:0, f2:0, f3:0, f4:0, f5:0, f6:0, f7:0, f8:0 },
-  result: null, expandId: null,
+  // Arrival form
+  arrForm: { vessel:'', reference:'', first_line:'', rtw:'', first_lift:'', remarks:'' },
+  // Prediction form
+  predForm: { qc:'', cmph:'', f1:0, f2:0, f3:0, f4:0, f5:0, f6:0, f7:0, f8:0 },
+  predResult: null,
+  selectedId: null,
+  // Dashboard filters
   weekFilter: 'all', monthFilter: 'all'
 };
 
 const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 const addMin = (d, m) => new Date(d.getTime() + m * 60000);
 const toHM = d => d.toTimeString().slice(0,5);
-const parseT = s => { const [h,m] = s.split(':'); const d = new Date(); d.setHours(+h,+m,0,0); return d; };
+const parseT = s => {
+  const [h,m] = s.split(':');
+  const d = new Date();
+  d.setHours(+h, +m, 0, 0);
+  return d;
+};
+const minDiff = (a, b) => Math.round((parseT(b) - parseT(a)) / 60000);
 
-// ISO workweek helpers (Monday-start)
+// ── ISO WEEK / MONTH HELPERS ──
 function getISOWeek(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
@@ -61,21 +72,42 @@ function getWeekRange(weekKey) {
 function formatWeekLabel(weekKey) {
   const { monday, sunday } = getWeekRange(weekKey);
   const fmt = d => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
-  return weekKey + '  (' + fmt(monday) + ' \u2013 ' + fmt(sunday) + ')';
+  return weekKey + ' (' + fmt(monday) + ' \u2013 ' + fmt(sunday) + ')';
 }
 function getMonthKey(date) {
   return date.getFullYear() + '-M' + String(date.getMonth() + 1).padStart(2,'0');
 }
 function formatMonthLabel(monthKey) {
   const [yr, mo] = monthKey.split('-M').map(Number);
-  const d = new Date(yr, mo - 1, 1);
-  return d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  return new Date(yr, mo - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 }
 
+// ── SRT ROUND UP TO NEAREST 15 MIN ──
+function roundUpTo15(d) {
+  const mins = d.getHours() * 60 + d.getMinutes();
+  const remainder = mins % 15;
+  const roundedMins = remainder === 0 ? mins : mins + (15 - remainder);
+  const srt = new Date(d);
+  srt.setHours(Math.floor(roundedMins / 60), roundedMins % 60, 0, 0);
+  return srt;
+}
+
+// ── CLASSIFICATION ──
+function classifySRT(srtTime, actualLastLift) {
+  const srt = parseT(srtTime);
+  const actual = parseT(actualLastLift);
+  const windowStart = addMin(srt, -15);
+  return (actual >= windowStart && actual <= srt) ? 'GOOD' : 'NOT QUALITY';
+}
+function classifyQS(mins, target) {
+  return mins <= target ? 'GOOD' : 'NOT QUALITY';
+}
+
+// ── DB ──
 async function loadRecords() {
   S.loading = true; renderTab();
   try {
-    const { data, error } = await window.sb.from('pilot_booking_records').select('*').order('created_at', { ascending: false });
+    const { data, error } = await window.sb.from('vsr_records').select('*').order('created_at', { ascending: false });
     if (error) throw error;
     S.records = data || [];
   } catch(e) {
@@ -88,7 +120,7 @@ async function loadRecords() {
 
 async function dbInsert(rec) {
   try {
-    const { error } = await window.sb.from('pilot_booking_records').insert([rec]);
+    const { error } = await window.sb.from('vsr_records').insert([rec]);
     if (error) throw error;
     return true;
   } catch(e) {
@@ -99,7 +131,7 @@ async function dbInsert(rec) {
 
 async function dbUpdate(id, updates) {
   try {
-    const { error } = await window.sb.from('pilot_booking_records').update(updates).eq('id', id);
+    const { error } = await window.sb.from('vsr_records').update(updates).eq('id', id);
     if (error) throw error;
     return true;
   } catch(e) {
@@ -108,6 +140,7 @@ async function dbUpdate(id, updates) {
   }
 }
 
+// ── CALC ──
 function calcAll(f, cmph, qcSpeed) {
   const base = 60 / cmph;
   let containerMin = 0;
@@ -117,50 +150,60 @@ function calcAll(f, cmph, qcSpeed) {
   return { containerMin, gantryMin, bufferMin, totalMin: containerMin + gantryMin + bufferMin };
 }
 
-// QUALITY RULE:
-// GOOD: SRT - 15 min <= actual_last_lift <= SRT
-// NOT QUALITY: actual_last_lift more than 15 min before SRT, or after SRT
-function classifyQuality(srtTime, actualLastLift) {
-  const srt = parseT(srtTime);
-  const actual = parseT(actualLastLift);
-  const windowStart = addMin(srt, -15);
-  return (actual >= windowStart && actual <= srt) ? 'GOOD' : 'NOT QUALITY';
-}
-
-function syncForm() {
-  const ids = ['vessel','cmph','f1','f2','f3','f4','f5','f6','f7','f8'];
+function syncPredForm() {
+  const ids = ['cmph','f1','f2','f3','f4','f5','f6','f7','f8'];
   ids.forEach(id => {
-    const el = document.getElementById('f-' + id);
+    const el = document.getElementById('p-' + id);
     if (!el) return;
-    const val = el.value;
-    if (id === 'vessel') S.form.vessel = val.toUpperCase();
-    else if (id === 'cmph') S.form.cmph = val;
-    else S.form[id] = +val || 0;
+    if (id === 'cmph') S.predForm.cmph = el.value;
+    else S.predForm[id] = +el.value || 0;
   });
 }
 
-function updateHints() {
-  syncForm();
-  const cmph = parseFloat(S.form.cmph) || 0;
-  const qc = QC_DB.find(q => q.qc === S.form.qc);
+function updatePredHints() {
+  syncPredForm();
+  const cmph = parseFloat(S.predForm.cmph) || 0;
+  const qc = QC_DB.find(q => q.qc === S.predForm.qc);
   const qcSpeed = qc ? qc.speed : 50;
   const base = cmph > 0 ? 60 / cmph : 0;
   const fieldMap = { f1:1.0, f2:0.5, f3:1.9157, f4:1.5326, f5:3.0651, f6:1.9157 };
   Object.entries(fieldMap).forEach(([id, factor]) => {
-    const hint = document.getElementById('hint-' + id);
+    const hint = document.getElementById('ph-' + id);
     if (!hint) return;
-    const qty = parseFloat(S.form[id]) || 0;
+    const qty = parseFloat(S.predForm[id]) || 0;
     hint.textContent = (cmph && qty) ? (qty * base * factor).toFixed(1) + ' min' : '';
   });
-  const hg = document.getElementById('hint-f7');
-  if (hg) {
-    const bays = parseFloat(S.form.f7) || 0;
-    hg.textContent = (qcSpeed && bays) ? (bays * 17.5 / qcSpeed).toFixed(1) + ' min travel' : '';
-  }
-  const hc = document.getElementById('hint-cmph');
-  if (hc) hc.textContent = cmph > 0 ? (60/cmph).toFixed(2) + ' min per move' : '';
+  const hg = document.getElementById('ph-f7');
+  if (hg) { const b = parseFloat(S.predForm.f7)||0; hg.textContent = (qcSpeed&&b) ? (b*17.5/qcSpeed).toFixed(1)+' min travel':''; }
+  const hc = document.getElementById('ph-cmph');
+  if (hc) hc.textContent = cmph > 0 ? (60/cmph).toFixed(2)+' min per move' : '';
 }
 
+// ── TIME INPUT HELPER ──
+function hhInput(id, placeholder) {
+  return `<div class="iw" style="gap:0">
+    <input type="number" id="${id}-h" placeholder="HH" min="0" max="23" maxlength="2" style="text-align:center;flex:1" oninput="hhAdv(this,'${id}-m')">
+    <span style="padding:0 4px;color:#6b6b67;font-size:16px;flex-shrink:0">:</span>
+    <input type="number" id="${id}-m" placeholder="MM" min="0" max="59" maxlength="2" style="text-align:center;flex:1">
+  </div>`;
+}
+
+function readHM(id) {
+  const h = document.getElementById(id+'-h')?.value;
+  const m = document.getElementById(id+'-m')?.value;
+  if (h===''||h===null||m===''||m===null||h===undefined||m===undefined) return null;
+  return String(Math.min(23,Math.max(0,+h))).padStart(2,'0') + ':' + String(Math.min(59,Math.max(0,+m))).padStart(2,'0');
+}
+
+window.hhAdv = function(inp, nextId) {
+  if (inp.value.length >= 2) {
+    inp.value = Math.min(23, Math.max(0, +inp.value));
+    const el = document.getElementById(nextId);
+    if (el) el.focus();
+  }
+};
+
+// ── RENDER ──
 function R() {
   const root = document.getElementById('root');
   if (!root) return;
@@ -172,8 +215,8 @@ function R() {
 function renderLogin(root) {
   root.innerHTML = `<div class="login-wrap">
   <div class="card" style="text-align:center">
-    <i class="ti ti-anchor" style="font-size:36px;color:#185FA5"></i>
-    <div style="font-weight:600;font-size:16px;margin:12px 0 4px">PTP Pilot Booking System</div>
+    <i class="ti ti-ship" style="font-size:36px;color:#185FA5"></i>
+    <div style="font-weight:600;font-size:16px;margin:12px 0 4px">PTP Vessel Status Report</div>
     <div style="font-size:13px;color:#6b6b67;margin-bottom:20px">Port of Tanjung Pelepas</div>
     <div class="fi" style="margin-bottom:14px;text-align:left">
       <label>Employee ID</label>
@@ -184,10 +227,11 @@ function renderLogin(root) {
 }
 
 function renderApp(root) {
+  const pending = S.records.filter(r => !r.actual_last_lift_time);
   root.innerHTML = `
   <div class="topbar">
-    <i class="ti ti-anchor" style="font-size:20px;color:#185FA5;flex-shrink:0"></i>
-    <span class="topbar-title">PTP Pilot Booking</span>
+    <i class="ti ti-ship" style="font-size:20px;color:#185FA5;flex-shrink:0"></i>
+    <span class="topbar-title">PTP Vessel Status Report</span>
     <span class="topbar-sub">Port of Tanjung Pelepas</span>
     <span style="margin-left:auto;font-size:11px;color:#6b6b67;display:flex;align-items:center;gap:6px;flex-shrink:0">
       <i class="ti ti-user" style="font-size:13px"></i>${S.operator}
@@ -195,7 +239,9 @@ function renderApp(root) {
     </span>
   </div>
   <div class="nav">
-    <button class="${S.tab==='predict'?'active':''}" onclick="setTab('predict')"><i class="ti ti-calculator" style="font-size:14px"></i>Prediction</button>
+    <button class="${S.tab==='arrival'?'active':''}" onclick="setTab('arrival')"><i class="ti ti-anchor" style="font-size:14px"></i>Arrival</button>
+    <button class="${S.tab==='prediction'?'active':''}" onclick="setTab('prediction')"><i class="ti ti-calculator" style="font-size:14px"></i>Departure Pred.<span style="background:#f1f0eb;border-radius:4px;padding:1px 5px;font-size:10px;margin-left:4px">${pending.length}</span></button>
+    <button class="${S.tab==='actual'?'active':''}" onclick="setTab('actual')"><i class="ti ti-clipboard-check" style="font-size:14px"></i>Actual Dep.</button>
     <button class="${S.tab==='records'?'active':''}" onclick="setTab('records')"><i class="ti ti-clipboard-list" style="font-size:14px"></i>Records<span style="background:#f1f0eb;border-radius:4px;padding:1px 5px;font-size:10px;margin-left:4px">${S.records.length}</span></button>
     <button class="${S.tab==='dashboard'?'active':''}" onclick="setTab('dashboard')"><i class="ti ti-chart-bar" style="font-size:14px"></i>Dashboard</button>
   </div>
@@ -206,97 +252,195 @@ function renderApp(root) {
 function renderTab() {
   const tb = document.getElementById('tab-body');
   if (!tb) return;
-  if (S.tab === 'predict') renderPredict(tb);
-  else if (S.tab === 'records') renderRecords(tb);
+  if (S.tab==='arrival') renderArrival(tb);
+  else if (S.tab==='prediction') renderPrediction(tb);
+  else if (S.tab==='actual') renderActual(tb);
+  else if (S.tab==='records') renderRecords(tb);
   else renderDashboard(tb);
 }
 
-function renderPredict(tb) {
-  const f = S.form;
+// ── PHASE 1: ARRIVAL ──
+function renderArrival(tb) {
+  tb.innerHTML = `
+  <div class="card">
+    <div class="ctitle">Vessel information</div>
+    <div class="g2" style="margin-bottom:9px">
+      <div class="fi"><label>Vessel name</label>
+        <div class="iw"><input id="a-vessel" value="${S.arrForm.vessel}" placeholder="e.g. EVER GIVEN" style="text-transform:uppercase" oninput="S.arrForm.vessel=this.value.toUpperCase()"></div>
+      </div>
+      <div class="fi"><label>Vessel reference</label>
+        <div class="iw"><input id="a-ref" value="${S.arrForm.reference}" placeholder="e.g. VOY-2025-001" oninput="S.arrForm.reference=this.value"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="ctitle">Arrival times</div>
+    <div class="g3" style="margin-bottom:9px">
+      <div class="fi"><label>First line</label>${hhInput('a-fl','First line time')}</div>
+      <div class="fi"><label>Vessel secured (RTW)</label>${hhInput('a-rtw','RTW time')}</div>
+      <div class="fi"><label>First lift</label>${hhInput('a-fli','First lift time')}</div>
+    </div>
+    <div class="info-box" style="margin-bottom:9px">
+      Quick Start = First Lift \u2212 RTW &nbsp;\u00b7&nbsp; Target \u2264 20 minutes
+    </div>
+    <button class="btn" style="margin-bottom:9px" onclick="calcArrival()">Calculate arrival</button>
+    <div id="arr-result"></div>
+  </div>
+
+  <div class="card" id="arr-save-card" style="display:none">
+    <div class="fi" style="margin-bottom:9px">
+      <label>Remarks <span style="font-size:10px;color:#6b6b67">(mandatory)</span></label>
+      <textarea id="a-rem" rows="2" placeholder="Any notes about the arrival..."></textarea>
+    </div>
+    <button class="btn btn-green" onclick="saveArrival()">Save arrival record</button>
+  </div>`;
+}
+
+window.calcArrival = function() {
+  const vessel = document.getElementById('a-vessel')?.value.trim().toUpperCase();
+  const ref = document.getElementById('a-ref')?.value.trim();
+  const fl = readHM('a-fl');
+  const rtw = readHM('a-rtw');
+  const fli = readHM('a-fli');
+  if (!vessel) { alert('Please enter vessel name.'); return; }
+  if (!ref) { alert('Please enter vessel reference.'); return; }
+  if (!fl||!rtw||!fli) { alert('Please enter all three arrival times.'); return; }
+  const qs = minDiff(rtw, fli);
+  const qsClass = classifyQS(qs, 20);
+  S.arrForm = { vessel, reference:ref, first_line:fl, rtw, first_lift:fli, quick_start:qs, qs_class:qsClass };
+  const res = document.getElementById('arr-result');
+  res.innerHTML = `
+  <div class="rbox" style="margin-top:8px">
+    <div class="rrow"><span>First line</span><span class="rval">${fl}</span></div>
+    <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${rtw}</span></div>
+    <div class="rrow"><span>First lift</span><span class="rval">${fli}</span></div>
+    <div class="rrow" style="font-weight:500"><span>Quick Start (First Lift \u2212 RTW)</span><span class="rval">${qs} min &nbsp;<span class="badge ${qsClass==='GOOD'?'bg':'bb'}">${qsClass}</span></span></div>
+  </div>`;
+  document.getElementById('arr-save-card').style.display = 'block';
+};
+
+window.saveArrival = async function() {
+  const rem = document.getElementById('a-rem')?.value.trim();
+  if (!rem) { alert('Remarks are mandatory.'); return; }
+  const f = S.arrForm;
+  const rec = {
+    id: genId(),
+    vessel_name: f.vessel,
+    vessel_reference: f.reference,
+    first_line_time: f.first_line,
+    rtw_time: f.rtw,
+    first_lift_time: f.first_lift,
+    quick_start_minutes: f.quick_start,
+    quick_start_class: f.qs_class,
+    arrival_remarks: rem,
+    operator_id: S.operator,
+    created_at: new Date().toISOString()
+  };
+  const ok = await dbInsert(rec);
+  if (!ok) return;
+  S.arrForm = { vessel:'', reference:'', first_line:'', rtw:'', first_lift:'', remarks:'' };
+  alert('Arrival saved for ' + rec.vessel_name + '\nQuick Start: ' + rec.quick_start_minutes + ' min (' + rec.quick_start_class + ')');
+  S.tab = 'prediction';
+  await loadRecords();
+  R();
+};
+
+// ── PHASE 2: DEPARTURE PREDICTION ──
+function renderPrediction(tb) {
+  const pending = S.records.filter(r => !r.predicted_last_lift_time);
+  const f = S.predForm;
   const qc = QC_DB.find(q => q.qc === f.qc);
   const qcSpeed = qc ? qc.speed : null;
   const cmph = parseFloat(f.cmph) || 0;
   const base = cmph > 0 ? 60 / cmph : 0;
-  const mini = (id, factor) => { const qty = parseFloat(f[id]) || 0; return (cmph && qty) ? (qty * base * factor).toFixed(1) + ' min' : ''; };
+  const mini = (id, factor) => { const qty = parseFloat(f[id])||0; return (cmph&&qty)?(qty*base*factor).toFixed(1)+' min':''; };
 
   tb.innerHTML = `
   <div class="card">
-    <div class="ctitle">Vessel & crane</div>
+    <div class="ctitle">Select vessel record</div>
+    ${!pending.length ? '<div class="empty">No pending arrival records. Complete an arrival first.</div>' : `
+    <div class="fi">
+      <label>Vessel</label>
+      <div class="iw"><select id="sel-record" onchange="S.selectedId=this.value;renderTab()">
+        <option value="">— select vessel —</option>
+        ${pending.map(r => `<option value="${r.id}" ${S.selectedId===r.id?'selected':''}>${r.vessel_name} \u00b7 ${r.vessel_reference} \u00b7 ${new Date(r.created_at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'})}</option>`).join('')}
+      </select></div>
+    </div>
+    ${S.selectedId ? (() => { const r = S.records.find(x=>x.id===S.selectedId); return r ? `<div style="margin-top:8px" class="rbox">
+      <div class="rrow"><span>Vessel</span><span class="rval">${r.vessel_name}</span></div>
+      <div class="rrow"><span>Reference</span><span class="rval">${r.vessel_reference}</span></div>
+      <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
+    </div>` : ''; })() : ''}`}
+  </div>
+
+  ${S.selectedId ? `
+  <div class="card">
+    <div class="ctitle">Crane setup</div>
     <div class="g2" style="margin-bottom:9px">
-      <div class="fi">
-        <label>Vessel name</label>
-        <div class="iw"><input id="f-vessel" value="${f.vessel}" placeholder="e.g. EVER GIVEN" style="text-transform:uppercase"></div>
-      </div>
-      <div class="fi">
-        <label>QC number (Last Crane)</label>
-        <div class="iw"><select id="f-qc" onchange="onQC(this.value)">
+      <div class="fi"><label>QC number (Last crane)</label>
+        <div class="iw"><select id="p-qc" onchange="onPredQC(this.value)">
           <option value="">— select —</option>
-          ${QC_DB.map(q => `<option value="${q.qc}" ${f.qc===q.qc?'selected':''}>${q.qc}</option>`).join('')}
+          ${QC_DB.map(q=>`<option value="${q.qc}" ${f.qc===q.qc?'selected':''}>${q.qc}</option>`).join('')}
         </select></div>
-        ${qc ? `<div style="font-size:10px;color:#6b6b67;margin-top:2px">${qc.model} \u00b7 ${qc.speed} m/min</div>` : ''}
+        ${qc?`<div style="font-size:10px;color:#6b6b67;margin-top:2px">${qc.model} \u00b7 ${qc.speed} m/min</div>`:''}
+      </div>
+      <div class="fi"><label>CMPH</label>
+        <div class="iw"><input id="p-cmph" type="number" value="${f.cmph}" placeholder="e.g. 28" min="1" max="60" oninput="updatePredHints()"></div>
+        <div id="ph-cmph" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${cmph>0?(60/cmph).toFixed(2)+' min per move':''}</div>
       </div>
     </div>
-    <div class="g2">
-      <div class="fi">
-        <label>CMPH \u2014 crane moves per hour</label>
-        <div class="iw"><input id="f-cmph" type="number" value="${f.cmph}" placeholder="e.g. 28" min="1" max="60" oninput="updateHints()"></div>
-        <div id="hint-cmph" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${cmph > 0 ? (60/cmph).toFixed(2)+' min per move' : ''}</div>
-      </div>
-      <div class="fi">
-        <label>QC travel speed (m/min)</label>
-        <div class="iw"><input value="${qcSpeed ? qcSpeed.toFixed(1)+' m/min' : '\u2014'}" readonly></div>
-      </div>
-    </div>
+    ${qcSpeed ? `<div class="fi"><label>QC travel speed</label><div class="iw"><input value="${qcSpeed.toFixed(1)} m/min" readonly></div></div>` : ''}
   </div>
 
   <div class="card">
     <div class="ctitle">Container workload</div>
     <div class="g2" style="margin-bottom:9px">
       <div class="fi"><label>Normal container</label>
-        <div class="iw"><input id="f-f1" type="number" value="${f.f1||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
-        <div id="hint-f1" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f1',1.0)}</div>
+        <div class="iw"><input id="p-f1" type="number" value="${f.f1||''}" placeholder="Quantity" min="0" oninput="updatePredHints()"><div class="utag">Unit</div></div>
+        <div id="ph-f1" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f1',1.0)}</div>
       </div>
       <div class="fi"><label>Twin lift</label>
-        <div class="iw"><input id="f-f2" type="number" value="${f.f2||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
-        <div id="hint-f2" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f2',0.5)}</div>
+        <div class="iw"><input id="p-f2" type="number" value="${f.f2||''}" placeholder="Quantity" min="0" oninput="updatePredHints()"><div class="utag">Unit</div></div>
+        <div id="ph-f2" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f2',0.5)}</div>
       </div>
       <div class="fi"><label>Gearbox</label>
-        <div class="iw"><input id="f-f3" type="number" value="${f.f3||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
-        <div id="hint-f3" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f3',1.9157)}</div>
+        <div class="iw"><input id="p-f3" type="number" value="${f.f3||''}" placeholder="Quantity" min="0" oninput="updatePredHints()"><div class="utag">Unit</div></div>
+        <div id="ph-f3" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f3',1.9157)}</div>
       </div>
       <div class="fi"><label>Hatch cover</label>
-        <div class="iw"><input id="f-f4" type="number" value="${f.f4||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
-        <div id="hint-f4" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f4',1.5326)}</div>
+        <div class="iw"><input id="p-f4" type="number" value="${f.f4||''}" placeholder="Quantity" min="0" oninput="updatePredHints()"><div class="utag">Unit</div></div>
+        <div id="ph-f4" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f4',1.5326)}</div>
       </div>
       <div class="fi"><label>OOG</label>
-        <div class="iw"><input id="f-f5" type="number" value="${f.f5||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
-        <div id="hint-f5" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f5',3.0651)}</div>
+        <div class="iw"><input id="p-f5" type="number" value="${f.f5||''}" placeholder="Quantity" min="0" oninput="updatePredHints()"><div class="utag">Unit</div></div>
+        <div id="ph-f5" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f5',3.0651)}</div>
       </div>
       <div class="fi"><label>Open top</label>
-        <div class="iw"><input id="f-f6" type="number" value="${f.f6||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Unit</div></div>
-        <div id="hint-f6" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f6',1.9157)}</div>
+        <div class="iw"><input id="p-f6" type="number" value="${f.f6||''}" placeholder="Quantity" min="0" oninput="updatePredHints()"><div class="utag">Unit</div></div>
+        <div id="ph-f6" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${mini('f6',1.9157)}</div>
       </div>
     </div>
     <div class="g2">
       <div class="fi"><label>Gantry movement</label>
-        <div class="iw"><input id="f-f7" type="number" value="${f.f7||''}" placeholder="Quantity" min="0" oninput="updateHints()"><div class="utag">Bay</div></div>
-        <div id="hint-f7" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${(qcSpeed&&f.f7>0)?((+f.f7*17.5/qcSpeed).toFixed(1)+' min travel'):''}</div>
+        <div class="iw"><input id="p-f7" type="number" value="${f.f7||''}" placeholder="Quantity" min="0" oninput="updatePredHints()"><div class="utag">Bay</div></div>
+        <div id="ph-f7" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${(qcSpeed&&f.f7>0)?((+f.f7*17.5/qcSpeed).toFixed(1)+' min travel'):''}</div>
       </div>
       <div class="fi"><label>Breakdown</label>
-        <div class="iw"><input id="f-f8" type="number" value="${f.f8||''}" placeholder="Quantity" min="0"><div class="utag">Min</div></div>
-        <div style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">Added to total operation time</div>
+        <div class="iw"><input id="p-f8" type="number" value="${f.f8||''}" placeholder="Quantity" min="0"><div class="utag">Min</div></div>
+        <div style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">Added to total time</div>
       </div>
     </div>
   </div>
 
   <div class="card">
-    <button class="btn" onclick="doCalc()">Calculate prediction</button>
-    ${S.result ? renderResult() : ''}
-  </div>`;
+    <button class="btn" onclick="doPredCalc()">Calculate prediction</button>
+    ${S.predResult ? renderPredResult() : ''}
+  </div>` : ''}`;
 }
 
-function renderResult() {
-  const r = S.result;
+function renderPredResult() {
+  const r = S.predResult;
   return `<div class="sep"></div>
   <div class="ctitle">Prediction result</div>
   <div class="rbox">
@@ -306,335 +450,385 @@ function renderResult() {
     <div class="rrow" style="font-weight:500"><span>Total operation time</span><span class="rval">${r.totalMin.toFixed(1)} min \u00b7 ${(r.totalMin/60).toFixed(2)} hrs</span></div>
   </div>
   <div class="hrow">
-    <div><div style="font-size:12px;color:#6b6b67">Predicted last lift</div><div style="font-size:10px;color:#6b6b67;margin-top:2px">Current time + total operation time</div></div>
+    <div><div style="font-size:12px;color:#6b6b67">Predicted last lift</div><div style="font-size:10px;color:#6b6b67;margin-top:2px">Now + total operation time</div></div>
     <span class="bigtime" style="color:#185FA5">${r.lastLiftStr}</span>
   </div>
   <div class="hrow">
-    <div><div style="font-size:12px;color:#6b6b67">Recommended SRT</div></div>
+    <div><div style="font-size:12px;color:#6b6b67">Recommended SRT</div><div style="font-size:10px;color:#6b6b67;margin-top:2px">Rounded up to next 15 min mark</div></div>
     <span class="bigtime" style="color:#0F6E56">${r.srtStr}</span>
   </div>
-  <div class="info-box">Quality SRT: actual last lift must be within 15 min before SRT (up to SRT itself). Outside this window = NOT QUALITY.</div>
+  <div class="info-box">SRT is GOOD if actual last lift falls within 15 min before SRT (up to SRT itself).</div>
   <div class="sep"></div>
   <div class="fi" style="margin-bottom:9px">
     <label>Remarks <span style="font-size:10px;opacity:.6">(optional)</span></label>
-    <textarea id="p1-rem" rows="2" placeholder="Any notes or assumptions about this prediction..."></textarea>
+    <textarea id="pred-rem" rows="2" placeholder="Any notes or assumptions..."></textarea>
   </div>
-  <button class="btn btn-green" onclick="savePhase1()">Save prediction record</button>`;
+  <button class="btn btn-green" onclick="savePrediction()">Save prediction</button>`;
 }
 
+window.onPredQC = function(v) { syncPredForm(); S.predForm.qc = v; renderTab(); };
+
+window.doPredCalc = function() {
+  syncPredForm();
+  const f = S.predForm;
+  if (!f.qc) { alert('Please select a QC number.'); return; }
+  if (!f.cmph||+f.cmph<=0) { alert('Please enter CMPH.'); return; }
+  const qc = QC_DB.find(q=>q.qc===f.qc);
+  const res = calcAll(f, +f.cmph, qc?qc.speed:50);
+  const now = new Date();
+  const lastLift = addMin(now, res.totalMin);
+  const srtTime = roundUpTo15(lastLift);
+  S.predResult = { ...res, lastLiftStr: toHM(lastLift), srtStr: toHM(srtTime) };
+  renderTab();
+  setTimeout(()=>{ const el=document.querySelector('.hrow'); if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); },100);
+};
+
+window.savePrediction = async function() {
+  const rem = document.getElementById('pred-rem')?.value.trim()||'';
+  const f = S.predForm; const r = S.predResult;
+  const qc = QC_DB.find(q=>q.qc===f.qc);
+  const ok = await dbUpdate(S.selectedId, {
+    qc_number: f.qc,
+    qc_model: qc?.model||'',
+    qc_speed: qc?.speed||50,
+    cmph: +f.cmph,
+    f1:+f.f1,f2:+f.f2,f3:+f.f3,f4:+f.f4,f5:+f.f5,f6:+f.f6,f7:+f.f7,f8:+f.f8,
+    container_min: r.containerMin,
+    gantry_min: r.gantryMin,
+    buffer_min: r.bufferMin,
+    total_min: r.totalMin,
+    predicted_last_lift_time: r.lastLiftStr,
+    suggested_srt: r.srtStr,
+    prediction_remarks: rem,
+    prediction_operator: S.operator
+  });
+  if (!ok) return;
+  S.predResult = null;
+  S.predForm = { qc:'', cmph:'', f1:0, f2:0, f3:0, f4:0, f5:0, f6:0, f7:0, f8:0 };
+  alert('Prediction saved!\nCall pilot at: ' + r.srtStr);
+  S.tab = 'actual';
+  await loadRecords();
+  R();
+};
+
+// ── PHASE 3: ACTUAL DEPARTURE ──
+function renderActual(tb) {
+  const ready = S.records.filter(r => r.predicted_last_lift_time && !r.actual_last_lift_time);
+
+  tb.innerHTML = `
+  <div class="card">
+    <div class="ctitle">Select vessel record</div>
+    ${!ready.length ? '<div class="empty">No records awaiting actual data. Complete a departure prediction first.</div>' : `
+    <div class="fi">
+      <label>Vessel</label>
+      <div class="iw"><select id="act-sel" onchange="S.selectedId=this.value;renderTab()">
+        <option value="">— select vessel —</option>
+        ${ready.map(r=>`<option value="${r.id}" ${S.selectedId===r.id?'selected':''}>${r.vessel_name} \u00b7 ${r.vessel_reference} \u00b7 SRT ${r.suggested_srt}</option>`).join('')}
+      </select></div>
+    </div>
+    ${S.selectedId ? (() => {
+      const r = S.records.find(x=>x.id===S.selectedId);
+      if (!r) return '';
+      return `<div class="rbox" style="margin-top:8px">
+        <div class="rrow"><span>Vessel</span><span class="rval">${r.vessel_name}</span></div>
+        <div class="rrow"><span>Reference</span><span class="rval">${r.vessel_reference}</span></div>
+        <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
+        <div class="rrow"><span>Predicted last lift</span><span class="rval" style="color:#185FA5">${r.predicted_last_lift_time}</span></div>
+        <div class="rrow"><span>Recommended SRT</span><span class="rval" style="color:#0F6E56">${r.suggested_srt}</span></div>
+      </div>
+      <div class="sep"></div>
+      <div class="ctitle">Actual departure times</div>
+      <div class="time-group">
+        <div class="fi"><label>Actual last lift</label>${hhInput('d-ll','HH : MM')}</div>
+        <div class="fi"><label>Pilot onboard</label>${hhInput('d-po','HH : MM')}</div>
+        <div class="fi"><label>Actual SRT</label>${hhInput('d-srt','HH : MM')}</div>
+      </div>
+      <div class="g2" style="margin-bottom:9px">
+        <div class="fi"><label>Last line</label>${hhInput('d-lasline','HH : MM')}</div>
+      </div>
+      <div class="info-box" style="margin-bottom:9px">
+        Quick Sail = Last Line \u2212 Last Lift &nbsp;\u00b7&nbsp; Target \u2264 17 min<br>
+        Total Idle = Quick Start + Quick Sail &nbsp;\u00b7&nbsp; Target \u2264 37 min
+      </div>
+      <div class="fi" style="margin-bottom:9px">
+        <label>Remarks <span style="font-size:10px;color:#6b6b67">(mandatory)</span></label>
+        <textarea id="act-rem" rows="2" placeholder="What happened \u2014 delays, breakdowns, early completion, etc."></textarea>
+      </div>
+      <button class="btn btn-green" onclick="saveActual('${r.id}')">Save actual departure</button>`;
+    })() : ''}`}
+  </div>`;
+}
+
+window.saveActual = async function(id) {
+  const ll = readHM('d-ll');
+  const po = readHM('d-po');
+  const srt = readHM('d-srt');
+  const lastLine = readHM('d-lasline');
+  const rem = document.getElementById('act-rem')?.value.trim();
+  if (!ll||!po||!srt||!lastLine) { alert('All four time fields are mandatory.'); return; }
+  if (!rem) { alert('Remarks are mandatory.'); return; }
+  const rec = S.records.find(r=>r.id===id);
+  const srtWindowStart = toHM(addMin(parseT(rec.suggested_srt),-15));
+  const srtClass = classifySRT(rec.suggested_srt, ll);
+  const deviation = Math.round((parseT(ll)-parseT(rec.predicted_last_lift_time))/60000);
+  const quickSail = minDiff(ll, lastLine);
+  const qsClass = classifyQS(quickSail, 17);
+  const totalIdle = rec.quick_start_minutes + quickSail;
+  const totalIdleClass = totalIdle <= 37 ? 'GOOD' : 'NOT QUALITY';
+  const ok = await dbUpdate(id, {
+    actual_last_lift_time: ll,
+    actual_pilot_onboard_time: po,
+    actual_srt_time: srt,
+    last_line_time: lastLine,
+    srt_window_start: srtWindowStart,
+    srt_window_end: rec.suggested_srt,
+    srt_class: srtClass,
+    deviation_minutes: deviation,
+    quick_sail_minutes: quickSail,
+    quick_sail_class: qsClass,
+    total_idle_minutes: totalIdle,
+    total_idle_class: totalIdleClass,
+    departure_remarks: rem,
+    departure_operator: S.operator
+  });
+  if (!ok) return;
+  S.selectedId = null;
+  alert(`Saved!\nQuick Sail: ${quickSail} min (${qsClass})\nTotal Idle: ${totalIdle} min (${totalIdleClass})\nSRT: ${srtClass}`);
+  S.tab = 'records';
+  await loadRecords();
+  R();
+};
+
+// ── RECORDS ──
 function renderRecords(tb) {
-  const pending = S.records.filter(r => !r.actual_last_lift_time);
-  const completed = S.records.filter(r => r.actual_last_lift_time);
-  const list = S.recTab === 'done' ? completed : pending;
+  const all = S.records;
   tb.innerHTML = `
   <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-    <button class="btn-sm" onclick="S.recTab='pending';renderTab()" style="${S.recTab!=='done'?'border-color:#0F6E56;color:#0F6E56':''}">
-      Pending<span style="background:#f1f0eb;border-radius:4px;padding:1px 5px;font-size:10px;margin-left:4px">${pending.length}</span>
-    </button>
-    <button class="btn-sm" onclick="S.recTab='done';renderTab()" style="${S.recTab==='done'?'border-color:#0F6E56;color:#0F6E56':''}">
-      Completed<span style="background:#f1f0eb;border-radius:4px;padding:1px 5px;font-size:10px;margin-left:4px">${completed.length}</span>
-    </button>
     <button class="btn-sm" onclick="loadRecords()" style="margin-left:auto">
       <i class="ti ti-refresh" style="font-size:13px;vertical-align:-1px"></i> Refresh
     </button>
   </div>
   <div class="card">
-    ${S.loading ? '<div class="loading">Loading records...</div>' :
-      !list.length ? '<div class="empty">No records here yet.</div>' :
-      list.map(r => `
-      <div class="rec-row" onclick="toggleExp('${r.id}')">
-        <div style="min-width:0">
-          <div class="rec-vessel">${r.vessel_name}</div>
-          <div class="rec-meta">${r.qc_number} \u00b7 CMPH ${r.cmph} \u00b7 ${new Date(r.created_at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} \u00b7 ${r.operator_id}</div>
+    ${S.loading ? '<div class="loading">Loading...</div>' :
+      !all.length ? '<div class="empty">No records yet.</div>' :
+      all.map(r => {
+        const phase = !r.predicted_last_lift_time ? 'Arrival' : !r.actual_last_lift_time ? 'Prediction' : 'Completed';
+        const phaseBadge = phase==='Completed'?'bg':phase==='Prediction'?'bp':'bb';
+        return `
+        <div class="rec-row" onclick="toggleRecExp('${r.id}')">
+          <div style="min-width:0">
+            <div class="rec-vessel">${r.vessel_name} <span style="font-size:11px;color:#6b6b67;font-weight:400">\u00b7 ${r.vessel_reference}</span></div>
+            <div class="rec-meta">${new Date(r.created_at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} \u00b7 ${r.operator_id}</div>
+          </div>
+          <div class="rec-right">
+            <span class="badge ${phaseBadge}">${phase}</span>
+            <i class="ti ti-chevron-${S.expandRecId===r.id?'up':'down'}" style="font-size:14px;color:#6b6b67;flex-shrink:0"></i>
+          </div>
         </div>
-        <div class="rec-right">
-          <span class="badge ${r.booking_quality==='GOOD'?'bg':r.booking_quality==='NOT QUALITY'?'bb':'bp'}">${r.booking_quality||'Pending'}</span>
-          <i class="ti ti-chevron-${S.expandId===r.id?'up':'down'}" style="font-size:14px;color:#6b6b67;flex-shrink:0"></i>
-        </div>
-      </div>
-      ${S.expandId===r.id ? renderExpanded(r) : ''}`).join('')}
+        ${S.expandRecId===r.id ? renderRecordDetail(r) : ''}`;
+      }).join('')}
   </div>`;
 }
 
-function renderExpanded(r) {
-  const hasActual = !!r.actual_last_lift_time;
+function renderRecordDetail(r) {
   return `<div class="expand-panel">
-  <div class="ep-title">Phase 1 \u2014 prediction</div>
+  <div class="ep-title">Arrival \u2014 Phase 1</div>
+  <div class="rbox" style="margin-bottom:8px">
+    <div class="rrow"><span>Vessel reference</span><span class="rval">${r.vessel_reference}</span></div>
+    <div class="rrow"><span>First line</span><span class="rval">${r.first_line_time}</span></div>
+    <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${r.rtw_time}</span></div>
+    <div class="rrow"><span>First lift</span><span class="rval">${r.first_lift_time}</span></div>
+    <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
+    ${r.arrival_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.arrival_remarks}</span></div>`:''}
+  </div>
+  ${r.predicted_last_lift_time ? `
+  <div class="ep-title" style="margin-top:8px">Departure prediction \u2014 Phase 2</div>
   <div class="rbox" style="margin-bottom:8px">
     <div class="rrow"><span>QC / CMPH</span><span class="rval">${r.qc_number} \u00b7 ${r.cmph} CMPH</span></div>
-    <div class="rrow"><span>Container time</span><span class="rval">${parseFloat(r.container_min).toFixed(1)} min</span></div>
-    <div class="rrow"><span>Gantry + breakdown</span><span class="rval">${parseFloat(r.gantry_min).toFixed(1)} + ${r.buffer_min} min</span></div>
     <div class="rrow"><span>Total operation time</span><span class="rval">${parseFloat(r.total_min).toFixed(1)} min</span></div>
     <div class="rrow"><span>Predicted last lift</span><span class="rval" style="color:#185FA5">${r.predicted_last_lift_time}</span></div>
-    <div class="rrow"><span>Suggested SRT</span><span class="rval" style="color:#0F6E56">${r.suggested_srt}</span></div>
-    ${r.remarks ? `<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.remarks}</span></div>` : ''}
-  </div>
-  ${hasActual ? `
-  <div class="ep-title" style="margin-top:10px">Phase 2 \u2014 actual</div>
+    <div class="rrow"><span>Recommended SRT</span><span class="rval" style="color:#0F6E56">${r.suggested_srt}</span></div>
+    ${r.prediction_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.prediction_remarks}</span></div>`:''}
+  </div>` : ''}
+  ${r.actual_last_lift_time ? `
+  <div class="ep-title" style="margin-top:8px">Actual departure \u2014 Phase 3</div>
   <div class="rbox">
     <div class="rrow"><span>Actual last lift</span><span class="rval">${r.actual_last_lift_time}</span></div>
     <div class="rrow"><span>Pilot onboard</span><span class="rval">${r.actual_pilot_onboard_time}</span></div>
     <div class="rrow"><span>Actual SRT</span><span class="rval">${r.actual_srt_time}</span></div>
+    <div class="rrow"><span>Last line</span><span class="rval">${r.last_line_time}</span></div>
     <div class="rrow"><span>SRT compliance window</span><span class="rval">${r.srt_window_start} \u2013 ${r.srt_window_end}</span></div>
-    <div class="rrow"><span>Suggested SRT was</span><span class="rval" style="color:${r.booking_quality==='GOOD'?'#0F6E56':'#A32D2D'}">${r.suggested_srt} \u2192 ${r.booking_quality}</span></div>
-    <div class="rrow"><span>Deviation (pred vs actual LL)</span><span class="rval" style="color:${Math.abs(r.deviation_minutes)<=30?'#0F6E56':'#A32D2D'}">${r.deviation_minutes>0?'+':''}${r.deviation_minutes} min</span></div>
-    <div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.actual_remarks}</span></div>
-  </div>` : `
-  <div class="ep-title" style="margin-top:10px">Phase 2 \u2014 enter actual data</div>
-  <div class="time-group">
-    <div class="fi"><label>Actual last lift</label>
-      <div class="iw" style="gap:0">
-        <input type="number" id="a-ll-h" placeholder="HH" min="0" max="23" maxlength="2" style="text-align:center;flex:1" oninput="hhmmAutoAdvance(this,'a-ll-m')">
-        <span style="padding:0 4px;color:#6b6b67;font-size:16px;flex-shrink:0">:</span>
-        <input type="number" id="a-ll-m" placeholder="MM" min="0" max="59" maxlength="2" style="text-align:center;flex:1">
-      </div>
-    </div>
-    <div class="fi"><label>Pilot onboard</label>
-      <div class="iw" style="gap:0">
-        <input type="number" id="a-po-h" placeholder="HH" min="0" max="23" maxlength="2" style="text-align:center;flex:1" oninput="hhmmAutoAdvance(this,'a-po-m')">
-        <span style="padding:0 4px;color:#6b6b67;font-size:16px;flex-shrink:0">:</span>
-        <input type="number" id="a-po-m" placeholder="MM" min="0" max="59" maxlength="2" style="text-align:center;flex:1">
-      </div>
-    </div>
-    <div class="fi"><label>Actual SRT</label>
-      <div class="iw" style="gap:0">
-        <input type="number" id="a-srt-h" placeholder="HH" min="0" max="23" maxlength="2" style="text-align:center;flex:1" oninput="hhmmAutoAdvance(this,'a-srt-m')">
-        <span style="padding:0 4px;color:#6b6b67;font-size:16px;flex-shrink:0">:</span>
-        <input type="number" id="a-srt-m" placeholder="MM" min="0" max="59" maxlength="2" style="text-align:center;flex:1">
-      </div>
-    </div>
-  </div>
-  <div class="fi" style="margin-bottom:9px">
-    <label>Remarks <span style="font-size:10px;color:#6b6b67">(mandatory)</span></label>
-    <textarea id="a-rem" rows="2" placeholder="What happened \u2014 early completion, breakdown, vessel delay, etc."></textarea>
-  </div>
-  <button class="btn btn-green" onclick="savePhase2('${r.id}')">Save actual data</button>`}
+    <div class="rrow"><span>SRT result</span><span class="rval"><span class="badge ${r.srt_class==='GOOD'?'bg':'bb'}">${r.srt_class}</span></span></div>
+    <div class="rrow"><span>Quick Sail (Last Line \u2212 Last Lift)</span><span class="rval">${r.quick_sail_minutes} min <span class="badge ${r.quick_sail_class==='GOOD'?'bg':'bb'}">${r.quick_sail_class}</span></span></div>
+    <div class="rrow" style="font-weight:500"><span>Total Idle (QS + QSail)</span><span class="rval">${r.total_idle_minutes} min <span class="badge ${r.total_idle_class==='GOOD'?'bg':'bb'}">${r.total_idle_class}</span></span></div>
+    <div class="rrow"><span>LL deviation (pred vs actual)</span><span class="rval" style="color:${Math.abs(r.deviation_minutes)<=30?'#0F6E56':'#A32D2D'}">${r.deviation_minutes>0?'+':''}${r.deviation_minutes} min</span></div>
+    ${r.departure_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.departure_remarks}</span></div>`:''}
+  </div>` : ''}
   </div>`;
 }
 
+// ── DASHBOARD ──
 function renderDashboard(tb) {
-  const weekKeys = Array.from(new Set(S.records.map(r => getWeekKey(new Date(r.created_at))))).sort().reverse();
-  const monthKeys = Array.from(new Set(S.records.map(r => getMonthKey(new Date(r.created_at))))).sort().reverse();
+  const weekKeys = Array.from(new Set(S.records.map(r=>getWeekKey(new Date(r.created_at))))).sort().reverse();
+  const monthKeys = Array.from(new Set(S.records.map(r=>getMonthKey(new Date(r.created_at))))).sort().reverse();
 
-  let baseRecords = S.records;
-  if (S.monthFilter !== 'all') baseRecords = baseRecords.filter(r => getMonthKey(new Date(r.created_at)) === S.monthFilter);
-  if (S.weekFilter !== 'all') baseRecords = baseRecords.filter(r => getWeekKey(new Date(r.created_at)) === S.weekFilter);
+  let base = S.records;
+  if (S.monthFilter!=='all') base = base.filter(r=>getMonthKey(new Date(r.created_at))===S.monthFilter);
+  if (S.weekFilter!=='all') base = base.filter(r=>getWeekKey(new Date(r.created_at))===S.weekFilter);
 
-  const done = baseRecords.filter(r => r.actual_last_lift_time);
-  const good = done.filter(r => r.booking_quality === 'GOOD');
-  const notQ = done.filter(r => r.booking_quality === 'NOT QUALITY');
-  const avgDev = done.length ? Math.round(done.reduce((s,r) => s + Math.abs(r.deviation_minutes), 0) / done.length) : 0;
-  const srtRate = done.length ? Math.round(good.length / done.length * 100) : 0;
-  const isFiltered = S.weekFilter !== 'all' || S.monthFilter !== 'all';
+  const done = base.filter(r=>r.actual_last_lift_time);
+  const isFiltered = S.weekFilter!=='all'||S.monthFilter!=='all';
+
+  // Quick Start
+  const qsAll = base.filter(r=>r.quick_start_minutes!=null);
+  const qsGood = qsAll.filter(r=>r.quick_start_class==='GOOD');
+  const qsAvg = qsAll.length ? Math.round(qsAll.reduce((s,r)=>s+r.quick_start_minutes,0)/qsAll.length) : 0;
+  const qsRate = qsAll.length ? Math.round(qsGood.length/qsAll.length*100) : 0;
+
+  // Quick Sail
+  const qsailAll = done.filter(r=>r.quick_sail_minutes!=null);
+  const qsailGood = qsailAll.filter(r=>r.quick_sail_class==='GOOD');
+  const qsailAvg = qsailAll.length ? Math.round(qsailAll.reduce((s,r)=>s+r.quick_sail_minutes,0)/qsailAll.length) : 0;
+  const qsailRate = qsailAll.length ? Math.round(qsailGood.length/qsailAll.length*100) : 0;
+
+  // SRT
+  const srtAll = done.filter(r=>r.srt_class);
+  const srtGood = srtAll.filter(r=>r.srt_class==='GOOD');
+  const srtRate = srtAll.length ? Math.round(srtGood.length/srtAll.length*100) : 0;
+
+  // Total Idle
+  const tiAll = done.filter(r=>r.total_idle_minutes!=null);
+  const tiGood = tiAll.filter(r=>r.total_idle_class==='GOOD');
+  const tiAvg = tiAll.length ? Math.round(tiAll.reduce((s,r)=>s+r.total_idle_minutes,0)/tiAll.length) : 0;
+  const tiRate = tiAll.length ? Math.round(tiGood.length/tiAll.length*100) : 0;
+
+  const color = (rate) => rate>=80?'#0F6E56':rate>=60?'#854F0B':'#A32D2D';
 
   tb.innerHTML = `
   <div class="filter-row">
-    <div class="fi">
-      <label>Month</label>
+    <div class="fi"><label>Month</label>
       <div class="iw"><select onchange="S.monthFilter=this.value;renderTab()">
         <option value="all" ${S.monthFilter==='all'?'selected':''}>All months</option>
-        ${monthKeys.map(mk => `<option value="${mk}" ${S.monthFilter===mk?'selected':''}>${formatMonthLabel(mk)}</option>`).join('')}
+        ${monthKeys.map(mk=>`<option value="${mk}" ${S.monthFilter===mk?'selected':''}>${formatMonthLabel(mk)}</option>`).join('')}
       </select></div>
     </div>
-    <div class="fi">
-      <label>Workweek (Mon\u2013Sun)</label>
+    <div class="fi"><label>Workweek (Mon\u2013Sun)</label>
       <div class="iw"><select onchange="S.weekFilter=this.value;renderTab()">
         <option value="all" ${S.weekFilter==='all'?'selected':''}>All weeks</option>
-        ${weekKeys.map(wk => `<option value="${wk}" ${S.weekFilter===wk?'selected':''}>${formatWeekLabel(wk)}</option>`).join('')}
+        ${weekKeys.map(wk=>`<option value="${wk}" ${S.weekFilter===wk?'selected':''}>${formatWeekLabel(wk)}</option>`).join('')}
       </select></div>
     </div>
   </div>
-  <div class="g4" style="margin-bottom:10px">
-    <div class="metric"><div class="mlabel">Total predictions</div><div class="mval">${baseRecords.length}</div><div class="msub">${isFiltered?'filtered':'all time'}</div></div>
-    <div class="metric"><div class="mlabel">Validated</div><div class="mval">${done.length}</div><div class="msub">with actual data</div></div>
-    <div class="metric"><div class="mlabel">SRT compliance</div><div class="mval" style="color:${srtRate>=80?'#0F6E56':srtRate>=60?'#854F0B':'#A32D2D'}">${srtRate}%</div><div class="msub">${good.length} GOOD \u00b7 ${notQ.length} NOT QUALITY</div></div>
-    <div class="metric"><div class="mlabel">Avg LL deviation</div><div class="mval">${avgDev} min</div><div class="msub">predicted vs actual</div></div>
+
+  <div class="g2" style="margin-bottom:10px">
+    <div class="metric">
+      <div class="mlabel">Quick Start compliance</div>
+      <div class="mval" style="color:${color(qsRate)}">${qsRate}%</div>
+      <div class="msub">${qsGood.length}/${qsAll.length} GOOD \u00b7 avg ${qsAvg} min \u00b7 target \u226420 min</div>
+    </div>
+    <div class="metric">
+      <div class="mlabel">Quick Sail compliance</div>
+      <div class="mval" style="color:${color(qsailRate)}">${qsailRate}%</div>
+      <div class="msub">${qsailGood.length}/${qsailAll.length} GOOD \u00b7 avg ${qsailAvg} min \u00b7 target \u226417 min</div>
+    </div>
+    <div class="metric">
+      <div class="mlabel">SRT compliance</div>
+      <div class="mval" style="color:${color(srtRate)}">${srtRate}%</div>
+      <div class="msub">${srtGood.length}/${srtAll.length} GOOD \u00b7 target \u226515 min before SRT</div>
+    </div>
+    <div class="metric">
+      <div class="mlabel">Total idle compliance</div>
+      <div class="mval" style="color:${color(tiRate)}">${tiRate}%</div>
+      <div class="msub">${tiGood.length}/${tiAll.length} GOOD \u00b7 avg ${tiAvg} min \u00b7 target \u226437 min</div>
+    </div>
   </div>
-  ${done.length < 1 ? `<div class="card empty">Complete some records first to see analytics.</div>` : `
+
+  ${done.length < 1 ? `<div class="card empty">Complete some records to see analytics.</div>` : `
+  <div class="card">
+    <div class="ctitle">Quick Start vs Quick Sail \u2014 last 10 vessels</div>
+    <div style="position:relative;width:100%;height:220px"><canvas id="ch-qs" role="img" aria-label="Quick Start vs Quick Sail chart"></canvas></div>
+  </div>
   <div class="card">
     <div class="ctitle">SRT compliance</div>
     <div style="display:flex;gap:16px;font-size:11px;color:#6b6b67;margin-bottom:8px;flex-wrap:wrap">
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#639922;display:inline-block"></span>GOOD (${good.length})</span>
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#E24B4A;display:inline-block"></span>NOT QUALITY (${notQ.length})</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#639922;display:inline-block"></span>GOOD (${srtGood.length})</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#E24B4A;display:inline-block"></span>NOT QUALITY (${srtAll.length-srtGood.length})</span>
     </div>
-    <div style="position:relative;width:100%;height:180px"><canvas id="ch-q" role="img" aria-label="SRT compliance chart">${good.length} GOOD, ${notQ.length} NOT QUALITY.</canvas></div>
-  </div>
-  <div class="card">
-    <div class="ctitle">Last lift deviation \u2014 last 12 records</div>
-    <div style="display:flex;gap:16px;font-size:11px;color:#6b6b67;margin-bottom:8px;flex-wrap:wrap">
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#378ADD;display:inline-block"></span>Within 30 min</span>
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#E24B4A;display:inline-block"></span>Over 30 min</span>
-    </div>
-    <div style="position:relative;width:100%;height:200px"><canvas id="ch-d" role="img" aria-label="Deviation chart">Deviation in minutes per vessel.</canvas></div>
+    <div style="position:relative;width:100%;height:170px"><canvas id="ch-srt" role="img" aria-label="SRT compliance chart"></canvas></div>
   </div>
   <div class="card">
     <div class="ctitle">Recent completed records</div>
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Date</th><th>Vessel</th><th>QC</th>
-        <th>Pred LL</th><th>Actual LL</th>
-        <th>SRT</th><th>Dev</th><th>Quality</th><th>SRT Gap</th>
+        <th>Date</th><th>Vessel</th><th>Q.Start</th><th>Q.Sail</th><th>Total Idle</th><th>SRT</th>
       </tr></thead>
-      <tbody>${done.slice(0,10).map(r => {
-        const srtGap = Math.round((parseT(r.actual_last_lift_time) - parseT(r.suggested_srt)) / 60000);
-        return `<tr>
+      <tbody>${done.slice(0,10).map(r=>`<tr>
         <td style="font-family:monospace">${new Date(r.created_at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'})}</td>
         <td>${r.vessel_name}</td>
-        <td style="font-family:monospace">${r.qc_number}</td>
-        <td style="font-family:monospace">${r.predicted_last_lift_time}</td>
-        <td style="font-family:monospace">${r.actual_last_lift_time}</td>
-        <td style="font-family:monospace">${r.suggested_srt}</td>
-        <td style="font-family:monospace;color:${Math.abs(r.deviation_minutes)<=30?'#0F6E56':'#A32D2D'}">${r.deviation_minutes>0?'+':''}${r.deviation_minutes}</td>
-        <td><span class="badge ${r.booking_quality==='GOOD'?'bg':'bb'}">${r.booking_quality}</span></td>
-        <td style="font-family:monospace;color:${r.booking_quality==='GOOD'?'#0F6E56':'#A32D2D'}">${srtGap>0?'+':''}${srtGap} min</td>
-      </tr>`;
-      }).join('')}</tbody>
+        <td><span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_minutes}m</span></td>
+        <td><span class="badge ${r.quick_sail_class==='GOOD'?'bg':'bb'}">${r.quick_sail_minutes}m</span></td>
+        <td><span class="badge ${r.total_idle_class==='GOOD'?'bg':'bb'}">${r.total_idle_minutes}m</span></td>
+        <td><span class="badge ${r.srt_class==='GOOD'?'bg':'bb'}">${r.srt_class}</span></td>
+      </tr>`).join('')}</tbody>
     </table>
     </div>
   </div>`}`;
 
   if (done.length >= 1) {
     setTimeout(() => {
-      if (document.getElementById('ch-q')) {
-        new Chart(document.getElementById('ch-q'), {
-          type: 'doughnut',
-          data: { labels:['GOOD','NOT QUALITY'], datasets:[{ data:[good.length,notQ.length], backgroundColor:['#639922','#E24B4A'], borderWidth:0 }] },
-          options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, cutout:'65%' }
+      const last10 = done.slice(0,10).reverse();
+      if (document.getElementById('ch-qs')) {
+        new Chart(document.getElementById('ch-qs'), {
+          type: 'bar',
+          data: {
+            labels: last10.map(r=>r.vessel_name.slice(0,8)),
+            datasets: [
+              { label:'Quick Start', data: last10.map(r=>r.quick_start_minutes), backgroundColor:'#378ADD', borderRadius:3, borderWidth:0 },
+              { label:'Quick Sail', data: last10.map(r=>r.quick_sail_minutes), backgroundColor:'#F58220', borderRadius:3, borderWidth:0 }
+            ]
+          },
+          options: { responsive:true, maintainAspectRatio:false,
+            plugins:{ legend:{ display:true, position:'top', labels:{ font:{size:10}, boxWidth:10 } } },
+            scales:{
+              y:{ grid:{color:'rgba(0,0,0,.06)'}, ticks:{font:{size:10}}, title:{display:true,text:'Minutes',font:{size:10}} },
+              x:{ ticks:{autoSkip:false,maxRotation:35,font:{size:10}} }
+            }
+          }
         });
       }
-      const last12 = done.slice(0,12).reverse();
-      if (document.getElementById('ch-d')) {
-        new Chart(document.getElementById('ch-d'), {
-          type: 'bar',
-          data: { labels: last12.map(r => r.vessel_name.slice(0,10)), datasets:[{ data: last12.map(r => r.deviation_minutes), backgroundColor: last12.map(r => Math.abs(r.deviation_minutes)<=30?'#378ADD':'#E24B4A'), borderWidth:0, borderRadius:3 }] },
-          options: { responsive:true, maintainAspectRatio:false, scales:{ y:{ grid:{ color:'rgba(0,0,0,.06)' }, ticks:{ font:{size:10} } }, x:{ ticks:{ autoSkip:false, maxRotation:35, font:{size:10} } } }, plugins:{ legend:{ display:false } } }
+      if (document.getElementById('ch-srt')) {
+        new Chart(document.getElementById('ch-srt'), {
+          type: 'doughnut',
+          data: { labels:['GOOD','NOT QUALITY'], datasets:[{ data:[srtGood.length,srtAll.length-srtGood.length], backgroundColor:['#639922','#E24B4A'], borderWidth:0 }] },
+          options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, cutout:'65%' }
         });
       }
     }, 150);
   }
 }
 
+// ── GLOBAL HANDLERS ──
 window.doLogin = function() {
   const v = document.getElementById('op-inp')?.value.trim().toUpperCase();
   if (!v) { alert('Please enter your employee ID.'); return; }
   S.operator = v;
   localStorage.setItem('ptp_op', v);
-  loadRecords().then(() => R());
+  loadRecords().then(()=>R());
 };
-
-window.doLogout = function() {
-  S.operator = '';
-  S.records = [];
-  localStorage.removeItem('ptp_op');
-  R();
-};
-
+window.doLogout = function() { S.operator=''; S.records=[]; localStorage.removeItem('ptp_op'); R(); };
 window.setTab = function(t) {
-  S.tab = t;
-  S.result = null;
+  S.tab=t; S.predResult=null;
   R();
-  if (t === 'records' || t === 'dashboard') loadRecords();
+  if (t==='records'||t==='dashboard'||t==='prediction'||t==='actual') loadRecords();
 };
+window.toggleRecExp = function(id) { S.expandRecId = S.expandRecId===id?null:id; renderTab(); };
 
-window.onQC = function(v) { syncForm(); S.form.qc = v; renderTab(); };
-window.toggleExp = function(id) { S.expandId = S.expandId===id ? null : id; renderTab(); };
-
-window.hhmmAutoAdvance = function(hourInput, minuteId) {
-  if (hourInput.value.length >= 2) {
-    hourInput.value = Math.min(23, Math.max(0, +hourInput.value));
-    const minEl = document.getElementById(minuteId);
-    if (minEl) minEl.focus();
-  }
-};
-
-window.doCalc = function() {
-  syncForm();
-  const f = S.form;
-  if (!f.vessel) { alert('Please enter the vessel name.'); return; }
-  if (!f.qc) { alert('Please select a QC number.'); return; }
-  if (!f.cmph || +f.cmph <= 0) { alert('Please enter CMPH.'); return; }
-  const qc = QC_DB.find(q => q.qc === f.qc);
-  const res = calcAll(f, +f.cmph, qc ? qc.speed : 50);
-  const now = new Date();
-  const lastLift = addMin(now, res.totalMin);
-
-// Round UP to nearest 15-min mark (stay if already on mark)
-function roundUpTo15(d) {
-  const mins = d.getHours() * 60 + d.getMinutes();
-  const remainder = mins % 15;
-  const roundedMins = remainder === 0 ? mins : mins + (15 - remainder);
-  const srt = new Date(d);
-  srt.setHours(Math.floor(roundedMins / 60), roundedMins % 60, 0, 0);
-  return srt;
-}
-
-const srtTime = roundUpTo15(lastLift);
-S.result = { ...res, lastLiftStr: toHM(lastLift), srtStr: toHM(srtTime) };
-  renderTab();
-  setTimeout(() => { const el = document.querySelector('.hrow'); if (el) el.scrollIntoView({ behavior:'smooth', block:'nearest' }); }, 100);
-};
-
-window.savePhase1 = async function() {
-  syncForm();
-  const rem = document.getElementById('p1-rem')?.value.trim() || '';
-  const f = S.form; const r = S.result;
-  const qc = QC_DB.find(q => q.qc === f.qc);
-  const rec = {
-    id: genId(), vessel_name: f.vessel, qc_number: f.qc,
-    qc_model: qc?.model||'', qc_speed: qc?.speed||50, cmph: +f.cmph,
-    f1:+f.f1, f2:+f.f2, f3:+f.f3, f4:+f.f4, f5:+f.f5, f6:+f.f6, f7:+f.f7, f8:+f.f8,
-    container_min: r.containerMin, gantry_min: r.gantryMin,
-    buffer_min: r.bufferMin, total_min: r.totalMin,
-    predicted_last_lift_time: r.lastLiftStr, suggested_srt: r.srtStr,
-    operator_id: S.operator, remarks: rem,
-    created_at: new Date().toISOString()
-  };
-  const ok = await dbInsert(rec);
-  if (!ok) return;
-  S.result = null;
-  S.form = { vessel:'', qc:'', cmph:'', f1:0, f2:0, f3:0, f4:0, f5:0, f6:0, f7:0, f8:0 };
-  alert('Saved: ' + rec.vessel_name + '\nRecommended SRT: ' + rec.suggested_srt);
-  S.tab = 'records'; S.recTab = 'pending';
-  await loadRecords();
-  R();
-};
-
-window.savePhase2 = async function(id) {
-  const readHM = (hId, mId) => {
-    const h = document.getElementById(hId)?.value;
-    const m = document.getElementById(mId)?.value;
-    if (h === '' || h === null || m === '' || m === null) return null;
-    const hh = String(Math.min(23, Math.max(0, +h))).padStart(2,'0');
-    const mm = String(Math.min(59, Math.max(0, +m))).padStart(2,'0');
-    return hh + ':' + mm;
-  };
-  const ll = readHM('a-ll-h', 'a-ll-m');
-  const po = readHM('a-po-h', 'a-po-m');
-  const srt = readHM('a-srt-h', 'a-srt-m');
-  const rem = document.getElementById('a-rem')?.value.trim();
-  if (!ll || !po || !srt) { alert('All three time fields are mandatory.'); return; }
-  if (!rem) { alert('Remarks are mandatory.'); return; }
-  const rec = S.records.find(r => r.id === id);
-  const srtWindowStart = toHM(addMin(parseT(rec.suggested_srt), -15));
-  const quality = classifyQuality(rec.suggested_srt, ll);
-  const deviation = Math.round((parseT(ll) - parseT(rec.predicted_last_lift_time)) / 60000);
-  const ok = await dbUpdate(id, {
-    actual_last_lift_time: ll, actual_pilot_onboard_time: po, actual_srt_time: srt,
-    srt_window_start: srtWindowStart, srt_window_end: rec.suggested_srt, booking_quality: quality,
-    deviation_minutes: deviation, actual_remarks: rem
-  });
-  if (!ok) return;
-  S.expandId = null;
-  await loadRecords();
-  renderTab();
-};
-
-// ── BOOT ──────────────────────────────────────────────
+// ── BOOT ──
 (function boot() {
   if (window.supabase && window.sb) {
     loadQCDatabase().then(() => {
-      if (S.operator) loadRecords().then(() => R());
+      if (S.operator) loadRecords().then(()=>R());
       else R();
     });
   } else {
