@@ -21,26 +21,20 @@ let S = {
   tab: 'arrival',
   operator: localStorage.getItem('ptp_op') || '',
   records: [], loading: false,
-  // Arrival form
   arrForm: { vessel:'', reference:'', first_line:'', rtw:'', first_lift:'', remarks:'' },
-  // Prediction form
   predForm: { qc:'', cmph:'', f1:0, f2:0, f3:0, f4:0, f5:0, f6:0, f7:0, f8:0 },
   predResult: null,
   selectedId: null,
-  // Dashboard filters
-  weekFilter: 'all', monthFilter: 'all'
+  weekFilter: 'all', monthFilter: 'all',
+  expandRecId: null
 };
 
 const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 const addMin = (d, m) => new Date(d.getTime() + m * 60000);
 const toHM = d => d.toTimeString().slice(0,5);
-const parseT = s => {
-  const [h,m] = s.split(':');
-  const d = new Date();
-  d.setHours(+h, +m, 0, 0);
-  return d;
-};
+const parseT = s => { const [h,m] = s.split(':'); const d = new Date(); d.setHours(+h,+m,0,0); return d; };
 const minDiff = (a, b) => Math.round((parseT(b) - parseT(a)) / 60000);
+const tToMins = s => { const [h,m] = s.split(':'); return +h*60 + +m; };
 
 // ── ISO WEEK / MONTH HELPERS ──
 function getISOWeek(date) {
@@ -99,9 +93,7 @@ function classifySRT(srtTime, actualLastLift) {
   const windowStart = addMin(srt, -15);
   return (actual >= windowStart && actual <= srt) ? 'GOOD' : 'NOT QUALITY';
 }
-function classifyQS(mins, target) {
-  return mins <= target ? 'GOOD' : 'NOT QUALITY';
-}
+function classifyQS(mins, target) { return mins <= target ? 'GOOD' : 'NOT QUALITY'; }
 
 // ── DB ──
 async function loadRecords() {
@@ -123,10 +115,7 @@ async function dbInsert(rec) {
     const { error } = await window.sb.from('vsr_records').insert([rec]);
     if (error) throw error;
     return true;
-  } catch(e) {
-    alert('Save failed: ' + e.message);
-    return false;
-  }
+  } catch(e) { alert('Save failed: ' + e.message); return false; }
 }
 
 async function dbUpdate(id, updates) {
@@ -134,10 +123,7 @@ async function dbUpdate(id, updates) {
     const { error } = await window.sb.from('vsr_records').update(updates).eq('id', id);
     if (error) throw error;
     return true;
-  } catch(e) {
-    alert('Update failed: ' + e.message);
-    return false;
-  }
+  } catch(e) { alert('Update failed: ' + e.message); return false; }
 }
 
 // ── CALC ──
@@ -174,13 +160,13 @@ function updatePredHints() {
     hint.textContent = (cmph && qty) ? (qty * base * factor).toFixed(1) + ' min' : '';
   });
   const hg = document.getElementById('ph-f7');
-  if (hg) { const b = parseFloat(S.predForm.f7)||0; hg.textContent = (qcSpeed&&b) ? (b*17.5/qcSpeed).toFixed(1)+' min travel':''; }
+  if (hg) { const b = parseFloat(S.predForm.f7)||0; hg.textContent = (qcSpeed&&b)?(b*17.5/qcSpeed).toFixed(1)+' min travel':''; }
   const hc = document.getElementById('ph-cmph');
   if (hc) hc.textContent = cmph > 0 ? (60/cmph).toFixed(2)+' min per move' : '';
 }
 
 // ── TIME INPUT HELPER ──
-function hhInput(id, placeholder) {
+function hhInput(id) {
   return `<div class="iw" style="gap:0">
     <input type="number" id="${id}-h" placeholder="HH" min="0" max="23" maxlength="2" style="text-align:center;flex:1" oninput="hhAdv(this,'${id}-m')">
     <span style="padding:0 4px;color:#6b6b67;font-size:16px;flex-shrink:0">:</span>
@@ -191,7 +177,7 @@ function hhInput(id, placeholder) {
 function readHM(id) {
   const h = document.getElementById(id+'-h')?.value;
   const m = document.getElementById(id+'-m')?.value;
-  if (h===''||h===null||m===''||m===null||h===undefined||m===undefined) return null;
+  if (h===''||h===null||h===undefined||m===''||m===null||m===undefined) return null;
   return String(Math.min(23,Math.max(0,+h))).padStart(2,'0') + ':' + String(Math.min(59,Math.max(0,+m))).padStart(2,'0');
 }
 
@@ -202,6 +188,35 @@ window.hhAdv = function(inp, nextId) {
     if (el) el.focus();
   }
 };
+
+// ── DONUT CHART BUILDER ──
+function donutChart(id, good, total, label, target, color1, color2) {
+  const notGood = total - good;
+  const rate = total ? Math.round(good/total*100) : 0;
+  const col = rate>=80?'#0F6E56':rate>=60?'#854F0B':'#A32D2D';
+  return `<div style="text-align:center">
+    <div style="font-size:11px;color:#6b6b67;margin-bottom:6px;font-weight:500">${label}</div>
+    <div style="position:relative;width:120px;height:120px;margin:0 auto">
+      <canvas id="${id}" role="img" aria-label="${label}: ${rate}% GOOD"></canvas>
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
+        <div style="font-size:20px;font-weight:600;color:${col}">${rate}%</div>
+      </div>
+    </div>
+    <div style="font-size:10px;color:#6b6b67;margin-top:6px">${good}/${total} GOOD</div>
+    <div style="font-size:10px;color:#6b6b67">${target}</div>
+  </div>`;
+}
+
+function initDonut(id, good, total) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const notGood = Math.max(0, total - good);
+  new Chart(el, {
+    type: 'doughnut',
+    data: { datasets: [{ data: total===0?[1,0]:[good, notGood], backgroundColor: total===0?['#e5e5e5','#e5e5e5']:['#639922','#E24B4A'], borderWidth: 0 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { enabled: total>0 } }, cutout: '68%' }
+  });
+}
 
 // ── RENDER ──
 function R() {
@@ -240,7 +255,7 @@ function renderApp(root) {
   </div>
   <div class="nav">
     <button class="${S.tab==='arrival'?'active':''}" onclick="setTab('arrival')"><i class="ti ti-anchor" style="font-size:14px"></i>Arrival</button>
-    <button class="${S.tab==='prediction'?'active':''}" onclick="setTab('prediction')"><i class="ti ti-calculator" style="font-size:14px"></i>Departure Pred.<span style="background:#f1f0eb;border-radius:4px;padding:1px 5px;font-size:10px;margin-left:4px">${pending.length}</span></button>
+    <button class="${S.tab==='prediction'?'active':''}" onclick="setTab('prediction')"><i class="ti ti-calculator" style="font-size:14px"></i>Dep. Prediction<span style="background:#f1f0eb;border-radius:4px;padding:1px 5px;font-size:10px;margin-left:4px">${pending.filter(r=>!r.predicted_last_lift_time).length}</span></button>
     <button class="${S.tab==='actual'?'active':''}" onclick="setTab('actual')"><i class="ti ti-clipboard-check" style="font-size:14px"></i>Actual Dep.</button>
     <button class="${S.tab==='records'?'active':''}" onclick="setTab('records')"><i class="ti ti-clipboard-list" style="font-size:14px"></i>Records<span style="background:#f1f0eb;border-radius:4px;padding:1px 5px;font-size:10px;margin-left:4px">${S.records.length}</span></button>
     <button class="${S.tab==='dashboard'?'active':''}" onclick="setTab('dashboard')"><i class="ti ti-chart-bar" style="font-size:14px"></i>Dashboard</button>
@@ -277,15 +292,16 @@ function renderArrival(tb) {
   <div class="card">
     <div class="ctitle">Arrival times</div>
     <div class="g3" style="margin-bottom:9px">
-      <div class="fi"><label>First line</label>${hhInput('a-fl','First line time')}</div>
-      <div class="fi"><label>Vessel secured (RTW)</label>${hhInput('a-rtw','RTW time')}</div>
-      <div class="fi"><label>First lift</label>${hhInput('a-fli','First lift time')}</div>
+      <div class="fi"><label>First line</label>${hhInput('a-fl')}</div>
+      <div class="fi"><label>Vessel secured (RTW)</label>${hhInput('a-rtw')}</div>
+      <div class="fi"><label>First lift</label>${hhInput('a-fli')}</div>
     </div>
     <div class="info-box" style="margin-bottom:9px">
-      Quick Start = First Lift \u2212 RTW &nbsp;\u00b7&nbsp; Target \u2264 20 minutes
+      Quick Start = First Lift \u2212 RTW &nbsp;\u00b7&nbsp; Target \u2264 20 min<br>
+      <strong>First Lift must not be earlier than First Line or RTW.</strong>
     </div>
-    <button class="btn" style="margin-bottom:9px" onclick="calcArrival()">Calculate arrival</button>
-    <div id="arr-result"></div>
+    <button class="btn" onclick="calcArrival()">Calculate arrival</button>
+    <div id="arr-result" style="margin-top:9px"></div>
   </div>
 
   <div class="card" id="arr-save-card" style="display:none">
@@ -306,16 +322,31 @@ window.calcArrival = function() {
   if (!vessel) { alert('Please enter vessel name.'); return; }
   if (!ref) { alert('Please enter vessel reference.'); return; }
   if (!fl||!rtw||!fli) { alert('Please enter all three arrival times.'); return; }
+
+  // ── POKA YOKE: First Lift cannot be earlier than First Line ──
+  if (tToMins(fli) < tToMins(fl)) {
+    alert('\u26a0\ufe0f Poka Yoke: First Lift (' + fli + ') cannot be earlier than First Line (' + fl + ').\nPlease check the times entered.');
+    return;
+  }
+  // ── POKA YOKE: First Lift cannot be earlier than RTW ──
+  if (tToMins(fli) < tToMins(rtw)) {
+    alert('\u26a0\ufe0f Poka Yoke: First Lift (' + fli + ') cannot be earlier than Vessel Secured / RTW (' + rtw + ').\nPlease check the times entered.');
+    return;
+  }
+
   const qs = minDiff(rtw, fli);
   const qsClass = classifyQS(qs, 20);
   S.arrForm = { vessel, reference:ref, first_line:fl, rtw, first_lift:fli, quick_start:qs, qs_class:qsClass };
+
   const res = document.getElementById('arr-result');
   res.innerHTML = `
-  <div class="rbox" style="margin-top:8px">
+  <div class="rbox">
     <div class="rrow"><span>First line</span><span class="rval">${fl}</span></div>
     <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${rtw}</span></div>
     <div class="rrow"><span>First lift</span><span class="rval">${fli}</span></div>
-    <div class="rrow" style="font-weight:500"><span>Quick Start (First Lift \u2212 RTW)</span><span class="rval">${qs} min &nbsp;<span class="badge ${qsClass==='GOOD'?'bg':'bb'}">${qsClass}</span></span></div>
+    <div class="rrow" style="font-weight:500"><span>Quick Start (First Lift \u2212 RTW)</span>
+      <span class="rval">${qs} min &nbsp;<span class="badge ${qsClass==='GOOD'?'bg':'bb'}">${qsClass}</span></span>
+    </div>
   </div>`;
   document.getElementById('arr-save-card').style.display = 'block';
 };
@@ -358,20 +389,24 @@ function renderPrediction(tb) {
 
   tb.innerHTML = `
   <div class="card">
-    <div class="ctitle">Select vessel record</div>
+    <div class="ctitle">Select vessel</div>
     ${!pending.length ? '<div class="empty">No pending arrival records. Complete an arrival first.</div>' : `
     <div class="fi">
       <label>Vessel</label>
       <div class="iw"><select id="sel-record" onchange="S.selectedId=this.value;renderTab()">
         <option value="">— select vessel —</option>
-        ${pending.map(r => `<option value="${r.id}" ${S.selectedId===r.id?'selected':''}>${r.vessel_name} \u00b7 ${r.vessel_reference} \u00b7 ${new Date(r.created_at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'})}</option>`).join('')}
+        ${pending.map(r=>`<option value="${r.id}" ${S.selectedId===r.id?'selected':''}>${r.vessel_name} \u00b7 ${r.vessel_reference} \u00b7 ${new Date(r.created_at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'})}</option>`).join('')}
       </select></div>
     </div>
-    ${S.selectedId ? (() => { const r = S.records.find(x=>x.id===S.selectedId); return r ? `<div style="margin-top:8px" class="rbox">
-      <div class="rrow"><span>Vessel</span><span class="rval">${r.vessel_name}</span></div>
-      <div class="rrow"><span>Reference</span><span class="rval">${r.vessel_reference}</span></div>
-      <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
-    </div>` : ''; })() : ''}`}
+    ${S.selectedId ? (() => {
+      const r = S.records.find(x=>x.id===S.selectedId);
+      if (!r) return '';
+      return `<div class="rbox" style="margin-top:8px">
+        <div class="rrow"><span>Vessel</span><span class="rval">${r.vessel_name}</span></div>
+        <div class="rrow"><span>Reference</span><span class="rval">${r.vessel_reference}</span></div>
+        <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
+      </div>`;
+    })() : ''}`}
   </div>
 
   ${S.selectedId ? `
@@ -390,7 +425,7 @@ function renderPrediction(tb) {
         <div id="ph-cmph" style="font-size:10px;color:#6b6b67;margin-top:2px;min-height:14px">${cmph>0?(60/cmph).toFixed(2)+' min per move':''}</div>
       </div>
     </div>
-    ${qcSpeed ? `<div class="fi"><label>QC travel speed</label><div class="iw"><input value="${qcSpeed.toFixed(1)} m/min" readonly></div></div>` : ''}
+    ${qcSpeed?`<div class="fi" style="margin-bottom:9px"><label>QC travel speed</label><div class="iw"><input value="${qcSpeed.toFixed(1)} m/min" readonly></div></div>`:''}
   </div>
 
   <div class="card">
@@ -488,19 +523,11 @@ window.savePrediction = async function() {
   const f = S.predForm; const r = S.predResult;
   const qc = QC_DB.find(q=>q.qc===f.qc);
   const ok = await dbUpdate(S.selectedId, {
-    qc_number: f.qc,
-    qc_model: qc?.model||'',
-    qc_speed: qc?.speed||50,
-    cmph: +f.cmph,
+    qc_number: f.qc, qc_model: qc?.model||'', qc_speed: qc?.speed||50, cmph: +f.cmph,
     f1:+f.f1,f2:+f.f2,f3:+f.f3,f4:+f.f4,f5:+f.f5,f6:+f.f6,f7:+f.f7,f8:+f.f8,
-    container_min: r.containerMin,
-    gantry_min: r.gantryMin,
-    buffer_min: r.bufferMin,
-    total_min: r.totalMin,
-    predicted_last_lift_time: r.lastLiftStr,
-    suggested_srt: r.srtStr,
-    prediction_remarks: rem,
-    prediction_operator: S.operator
+    container_min: r.containerMin, gantry_min: r.gantryMin, buffer_min: r.bufferMin, total_min: r.totalMin,
+    predicted_last_lift_time: r.lastLiftStr, suggested_srt: r.srtStr,
+    prediction_remarks: rem, prediction_operator: S.operator
   });
   if (!ok) return;
   S.predResult = null;
@@ -514,10 +541,9 @@ window.savePrediction = async function() {
 // ── PHASE 3: ACTUAL DEPARTURE ──
 function renderActual(tb) {
   const ready = S.records.filter(r => r.predicted_last_lift_time && !r.actual_last_lift_time);
-
   tb.innerHTML = `
   <div class="card">
-    <div class="ctitle">Select vessel record</div>
+    <div class="ctitle">Select vessel</div>
     ${!ready.length ? '<div class="empty">No records awaiting actual data. Complete a departure prediction first.</div>' : `
     <div class="fi">
       <label>Vessel</label>
@@ -529,7 +555,8 @@ function renderActual(tb) {
     ${S.selectedId ? (() => {
       const r = S.records.find(x=>x.id===S.selectedId);
       if (!r) return '';
-      return `<div class="rbox" style="margin-top:8px">
+      return `
+      <div class="rbox" style="margin-top:8px">
         <div class="rrow"><span>Vessel</span><span class="rval">${r.vessel_name}</span></div>
         <div class="rrow"><span>Reference</span><span class="rval">${r.vessel_reference}</span></div>
         <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
@@ -539,61 +566,62 @@ function renderActual(tb) {
       <div class="sep"></div>
       <div class="ctitle">Actual departure times</div>
       <div class="time-group">
-        <div class="fi"><label>Actual last lift</label>${hhInput('d-ll','HH : MM')}</div>
-        <div class="fi"><label>Pilot onboard</label>${hhInput('d-po','HH : MM')}</div>
-        <div class="fi"><label>Actual SRT</label>${hhInput('d-srt','HH : MM')}</div>
+        <div class="fi"><label>Actual last lift</label>${hhInput('d-ll')}</div>
+        <div class="fi"><label>Pilot onboard</label>${hhInput('d-po')}</div>
+        <div class="fi"><label>Actual SRT</label>${hhInput('d-srt')}</div>
       </div>
       <div class="g2" style="margin-bottom:9px">
-        <div class="fi"><label>Last line</label>${hhInput('d-lasline','HH : MM')}</div>
+        <div class="fi"><label>Last line</label>${hhInput('d-ll2')}</div>
       </div>
       <div class="info-box" style="margin-bottom:9px">
         Quick Sail = Last Line \u2212 Last Lift &nbsp;\u00b7&nbsp; Target \u2264 17 min<br>
-        Total Idle = Quick Start + Quick Sail &nbsp;\u00b7&nbsp; Target \u2264 37 min
+        Total Idle = Quick Start + Quick Sail &nbsp;\u00b7&nbsp; Target \u2264 37 min<br>
+        <strong>Last Line cannot be earlier than Last Lift.</strong>
       </div>
       <div class="fi" style="margin-bottom:9px">
         <label>Remarks <span style="font-size:10px;color:#6b6b67">(mandatory)</span></label>
         <textarea id="act-rem" rows="2" placeholder="What happened \u2014 delays, breakdowns, early completion, etc."></textarea>
       </div>
-      <button class="btn btn-green" onclick="saveActual('${r.id}')">Save actual departure</button>`;
+      <button class="btn btn-green" onclick="saveActual('${r.id}', ${r.quick_start_minutes})">Save actual departure</button>`;
     })() : ''}`}
   </div>`;
 }
 
-window.saveActual = async function(id) {
+window.saveActual = async function(id, quickStart) {
   const ll = readHM('d-ll');
   const po = readHM('d-po');
   const srt = readHM('d-srt');
-  const lastLine = readHM('d-lasline');
+  const lastLine = readHM('d-ll2');
   const rem = document.getElementById('act-rem')?.value.trim();
   if (!ll||!po||!srt||!lastLine) { alert('All four time fields are mandatory.'); return; }
   if (!rem) { alert('Remarks are mandatory.'); return; }
+
+  // ── POKA YOKE: Last Line cannot be earlier than Last Lift ──
+  if (tToMins(lastLine) < tToMins(ll)) {
+    alert('\u26a0\ufe0f Poka Yoke: Last Line (' + lastLine + ') cannot be earlier than Last Lift (' + ll + ').\nPlease check the times entered.');
+    return;
+  }
+
   const rec = S.records.find(r=>r.id===id);
   const srtWindowStart = toHM(addMin(parseT(rec.suggested_srt),-15));
   const srtClass = classifySRT(rec.suggested_srt, ll);
   const deviation = Math.round((parseT(ll)-parseT(rec.predicted_last_lift_time))/60000);
   const quickSail = minDiff(ll, lastLine);
-  const qsClass = classifyQS(quickSail, 17);
-  const totalIdle = rec.quick_start_minutes + quickSail;
+  const qsailClass = classifyQS(quickSail, 17);
+  const totalIdle = quickStart + quickSail;
   const totalIdleClass = totalIdle <= 37 ? 'GOOD' : 'NOT QUALITY';
+
   const ok = await dbUpdate(id, {
-    actual_last_lift_time: ll,
-    actual_pilot_onboard_time: po,
-    actual_srt_time: srt,
-    last_line_time: lastLine,
-    srt_window_start: srtWindowStart,
-    srt_window_end: rec.suggested_srt,
-    srt_class: srtClass,
-    deviation_minutes: deviation,
-    quick_sail_minutes: quickSail,
-    quick_sail_class: qsClass,
-    total_idle_minutes: totalIdle,
-    total_idle_class: totalIdleClass,
-    departure_remarks: rem,
-    departure_operator: S.operator
+    actual_last_lift_time: ll, actual_pilot_onboard_time: po, actual_srt_time: srt,
+    last_line_time: lastLine, srt_window_start: srtWindowStart, srt_window_end: rec.suggested_srt,
+    srt_class: srtClass, deviation_minutes: deviation,
+    quick_sail_minutes: quickSail, quick_sail_class: qsailClass,
+    total_idle_minutes: totalIdle, total_idle_class: totalIdleClass,
+    departure_remarks: rem, departure_operator: S.operator
   });
   if (!ok) return;
   S.selectedId = null;
-  alert(`Saved!\nQuick Sail: ${quickSail} min (${qsClass})\nTotal Idle: ${totalIdle} min (${totalIdleClass})\nSRT: ${srtClass}`);
+  alert(`Saved!\nSRT: ${srtClass}\nQuick Sail: ${quickSail} min (${qsailClass})\nTotal Idle: ${totalIdle} min (${totalIdleClass})`);
   S.tab = 'records';
   await loadRecords();
   R();
@@ -601,7 +629,6 @@ window.saveActual = async function(id) {
 
 // ── RECORDS ──
 function renderRecords(tb) {
-  const all = S.records;
   tb.innerHTML = `
   <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
     <button class="btn-sm" onclick="loadRecords()" style="margin-left:auto">
@@ -609,49 +636,48 @@ function renderRecords(tb) {
     </button>
   </div>
   <div class="card">
-    ${S.loading ? '<div class="loading">Loading...</div>' :
-      !all.length ? '<div class="empty">No records yet.</div>' :
-      all.map(r => {
-        const phase = !r.predicted_last_lift_time ? 'Arrival' : !r.actual_last_lift_time ? 'Prediction' : 'Completed';
-        const phaseBadge = phase==='Completed'?'bg':phase==='Prediction'?'bp':'bb';
-        return `
-        <div class="rec-row" onclick="toggleRecExp('${r.id}')">
-          <div style="min-width:0">
-            <div class="rec-vessel">${r.vessel_name} <span style="font-size:11px;color:#6b6b67;font-weight:400">\u00b7 ${r.vessel_reference}</span></div>
-            <div class="rec-meta">${new Date(r.created_at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} \u00b7 ${r.operator_id}</div>
-          </div>
-          <div class="rec-right">
-            <span class="badge ${phaseBadge}">${phase}</span>
-            <i class="ti ti-chevron-${S.expandRecId===r.id?'up':'down'}" style="font-size:14px;color:#6b6b67;flex-shrink:0"></i>
-          </div>
+    ${S.loading ? '<div class="loading">Loading...</div>' : !S.records.length ? '<div class="empty">No records yet.</div>' :
+    S.records.map(r => {
+      const phase = !r.predicted_last_lift_time ? 'Arrival' : !r.actual_last_lift_time ? 'Prediction' : 'Completed';
+      const phaseBadge = phase==='Completed'?'bg':phase==='Prediction'?'bp':'bb';
+      return `
+      <div class="rec-row" onclick="toggleRecExp('${r.id}')">
+        <div style="min-width:0">
+          <div class="rec-vessel">${r.vessel_name} <span style="font-size:11px;color:#6b6b67;font-weight:400">\u00b7 ${r.vessel_reference}</span></div>
+          <div class="rec-meta">${new Date(r.created_at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} \u00b7 ${r.operator_id}</div>
         </div>
-        ${S.expandRecId===r.id ? renderRecordDetail(r) : ''}`;
-      }).join('')}
+        <div class="rec-right">
+          <span class="badge ${phaseBadge}">${phase}</span>
+          <i class="ti ti-chevron-${S.expandRecId===r.id?'up':'down'}" style="font-size:14px;color:#6b6b67;flex-shrink:0"></i>
+        </div>
+      </div>
+      ${S.expandRecId===r.id ? renderRecordDetail(r) : ''}`;
+    }).join('')}
   </div>`;
 }
 
 function renderRecordDetail(r) {
   return `<div class="expand-panel">
-  <div class="ep-title">Arrival \u2014 Phase 1</div>
+  <div class="ep-title">Phase 1 \u2014 Arrival</div>
   <div class="rbox" style="margin-bottom:8px">
     <div class="rrow"><span>Vessel reference</span><span class="rval">${r.vessel_reference}</span></div>
     <div class="rrow"><span>First line</span><span class="rval">${r.first_line_time}</span></div>
     <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${r.rtw_time}</span></div>
     <div class="rrow"><span>First lift</span><span class="rval">${r.first_lift_time}</span></div>
-    <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
+    <div class="rrow" style="font-weight:500"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
     ${r.arrival_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.arrival_remarks}</span></div>`:''}
   </div>
-  ${r.predicted_last_lift_time ? `
-  <div class="ep-title" style="margin-top:8px">Departure prediction \u2014 Phase 2</div>
+  ${r.predicted_last_lift_time?`
+  <div class="ep-title" style="margin-top:8px">Phase 2 \u2014 Departure Prediction</div>
   <div class="rbox" style="margin-bottom:8px">
     <div class="rrow"><span>QC / CMPH</span><span class="rval">${r.qc_number} \u00b7 ${r.cmph} CMPH</span></div>
     <div class="rrow"><span>Total operation time</span><span class="rval">${parseFloat(r.total_min).toFixed(1)} min</span></div>
     <div class="rrow"><span>Predicted last lift</span><span class="rval" style="color:#185FA5">${r.predicted_last_lift_time}</span></div>
     <div class="rrow"><span>Recommended SRT</span><span class="rval" style="color:#0F6E56">${r.suggested_srt}</span></div>
     ${r.prediction_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.prediction_remarks}</span></div>`:''}
-  </div>` : ''}
-  ${r.actual_last_lift_time ? `
-  <div class="ep-title" style="margin-top:8px">Actual departure \u2014 Phase 3</div>
+  </div>`:''}
+  ${r.actual_last_lift_time?`
+  <div class="ep-title" style="margin-top:8px">Phase 3 \u2014 Actual Departure</div>
   <div class="rbox">
     <div class="rrow"><span>Actual last lift</span><span class="rval">${r.actual_last_lift_time}</span></div>
     <div class="rrow"><span>Pilot onboard</span><span class="rval">${r.actual_pilot_onboard_time}</span></div>
@@ -659,11 +685,11 @@ function renderRecordDetail(r) {
     <div class="rrow"><span>Last line</span><span class="rval">${r.last_line_time}</span></div>
     <div class="rrow"><span>SRT compliance window</span><span class="rval">${r.srt_window_start} \u2013 ${r.srt_window_end}</span></div>
     <div class="rrow"><span>SRT result</span><span class="rval"><span class="badge ${r.srt_class==='GOOD'?'bg':'bb'}">${r.srt_class}</span></span></div>
-    <div class="rrow"><span>Quick Sail (Last Line \u2212 Last Lift)</span><span class="rval">${r.quick_sail_minutes} min <span class="badge ${r.quick_sail_class==='GOOD'?'bg':'bb'}">${r.quick_sail_class}</span></span></div>
+    <div class="rrow" style="font-weight:500"><span>Quick Sail (Last Line \u2212 Last Lift)</span><span class="rval">${r.quick_sail_minutes} min <span class="badge ${r.quick_sail_class==='GOOD'?'bg':'bb'}">${r.quick_sail_class}</span></span></div>
     <div class="rrow" style="font-weight:500"><span>Total Idle (QS + QSail)</span><span class="rval">${r.total_idle_minutes} min <span class="badge ${r.total_idle_class==='GOOD'?'bg':'bb'}">${r.total_idle_class}</span></span></div>
     <div class="rrow"><span>LL deviation (pred vs actual)</span><span class="rval" style="color:${Math.abs(r.deviation_minutes)<=30?'#0F6E56':'#A32D2D'}">${r.deviation_minutes>0?'+':''}${r.deviation_minutes} min</span></div>
     ${r.departure_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.departure_remarks}</span></div>`:''}
-  </div>` : ''}
+  </div>`:''}
   </div>`;
 }
 
@@ -677,32 +703,28 @@ function renderDashboard(tb) {
   if (S.weekFilter!=='all') base = base.filter(r=>getWeekKey(new Date(r.created_at))===S.weekFilter);
 
   const done = base.filter(r=>r.actual_last_lift_time);
-  const isFiltered = S.weekFilter!=='all'||S.monthFilter!=='all';
 
-  // Quick Start
-  const qsAll = base.filter(r=>r.quick_start_minutes!=null);
-  const qsGood = qsAll.filter(r=>r.quick_start_class==='GOOD');
-  const qsAvg = qsAll.length ? Math.round(qsAll.reduce((s,r)=>s+r.quick_start_minutes,0)/qsAll.length) : 0;
-  const qsRate = qsAll.length ? Math.round(qsGood.length/qsAll.length*100) : 0;
+  const qsAll   = base.filter(r=>r.quick_start_minutes!=null);
+  const qsGood  = qsAll.filter(r=>r.quick_start_class==='GOOD');
+  const qsAvg   = qsAll.length ? Math.round(qsAll.reduce((s,r)=>s+r.quick_start_minutes,0)/qsAll.length) : 0;
 
-  // Quick Sail
-  const qsailAll = done.filter(r=>r.quick_sail_minutes!=null);
+  const qsailAll  = done.filter(r=>r.quick_sail_minutes!=null);
   const qsailGood = qsailAll.filter(r=>r.quick_sail_class==='GOOD');
-  const qsailAvg = qsailAll.length ? Math.round(qsailAll.reduce((s,r)=>s+r.quick_sail_minutes,0)/qsailAll.length) : 0;
-  const qsailRate = qsailAll.length ? Math.round(qsailGood.length/qsailAll.length*100) : 0;
+  const qsailAvg  = qsailAll.length ? Math.round(qsailAll.reduce((s,r)=>s+r.quick_sail_minutes,0)/qsailAll.length) : 0;
 
-  // SRT
-  const srtAll = done.filter(r=>r.srt_class);
+  const srtAll  = done.filter(r=>r.srt_class);
   const srtGood = srtAll.filter(r=>r.srt_class==='GOOD');
-  const srtRate = srtAll.length ? Math.round(srtGood.length/srtAll.length*100) : 0;
 
-  // Total Idle
-  const tiAll = done.filter(r=>r.total_idle_minutes!=null);
-  const tiGood = tiAll.filter(r=>r.total_idle_class==='GOOD');
-  const tiAvg = tiAll.length ? Math.round(tiAll.reduce((s,r)=>s+r.total_idle_minutes,0)/tiAll.length) : 0;
-  const tiRate = tiAll.length ? Math.round(tiGood.length/tiAll.length*100) : 0;
+  const tiAll   = done.filter(r=>r.total_idle_minutes!=null);
+  const tiGood  = tiAll.filter(r=>r.total_idle_class==='GOOD');
+  const tiAvg   = tiAll.length ? Math.round(tiAll.reduce((s,r)=>s+r.total_idle_minutes,0)/tiAll.length) : 0;
 
-  const color = (rate) => rate>=80?'#0F6E56':rate>=60?'#854F0B':'#A32D2D';
+  const srtRate  = srtAll.length  ? Math.round(srtGood.length/srtAll.length*100)   : 0;
+  const tiRate   = tiAll.length   ? Math.round(tiGood.length/tiAll.length*100)     : 0;
+  const qsRate   = qsAll.length   ? Math.round(qsGood.length/qsAll.length*100)     : 0;
+  const qsailRate= qsailAll.length? Math.round(qsailGood.length/qsailAll.length*100): 0;
+
+  const col = r => r>=80?'#0F6E56':r>=60?'#854F0B':'#A32D2D';
 
   tb.innerHTML = `
   <div class="filter-row">
@@ -720,50 +742,79 @@ function renderDashboard(tb) {
     </div>
   </div>
 
-  <div class="g2" style="margin-bottom:10px">
-    <div class="metric">
-      <div class="mlabel">Quick Start compliance</div>
-      <div class="mval" style="color:${color(qsRate)}">${qsRate}%</div>
-      <div class="msub">${qsGood.length}/${qsAll.length} GOOD \u00b7 avg ${qsAvg} min \u00b7 target \u226420 min</div>
+  <!-- MAIN METRICS: SRT + Total Idle (larger) -->
+  <div class="card">
+    <div class="ctitle">Key metrics</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:8px 0">
+      <div style="text-align:center">
+        <div style="font-size:12px;font-weight:500;color:#6b6b67;margin-bottom:8px">SRT Compliance</div>
+        <div style="position:relative;width:150px;height:150px;margin:0 auto">
+          <canvas id="ch-srt" role="img" aria-label="SRT compliance: ${srtRate}%"></canvas>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
+            <div style="font-size:26px;font-weight:700;color:${col(srtRate)}">${srtRate}%</div>
+            <div style="font-size:10px;color:#6b6b67">target 80%</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:#6b6b67;margin-top:8px">${srtGood.length}/${srtAll.length} GOOD</div>
+        <div style="font-size:10px;color:#6b6b67">SRT \u2212 15 min \u2264 Last Lift \u2264 SRT</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:12px;font-weight:500;color:#6b6b67;margin-bottom:8px">Total Idle Time</div>
+        <div style="position:relative;width:150px;height:150px;margin:0 auto">
+          <canvas id="ch-ti" role="img" aria-label="Total idle: ${tiRate}%"></canvas>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
+            <div style="font-size:26px;font-weight:700;color:${col(tiRate)}">${tiRate}%</div>
+            <div style="font-size:10px;color:#6b6b67">target 80%</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:#6b6b67;margin-top:8px">${tiGood.length}/${tiAll.length} GOOD &nbsp;\u00b7&nbsp; avg ${tiAvg} min</div>
+        <div style="font-size:10px;color:#6b6b67">target \u2264 37 min total</div>
+      </div>
     </div>
-    <div class="metric">
-      <div class="mlabel">Quick Sail compliance</div>
-      <div class="mval" style="color:${color(qsailRate)}">${qsailRate}%</div>
-      <div class="msub">${qsailGood.length}/${qsailAll.length} GOOD \u00b7 avg ${qsailAvg} min \u00b7 target \u226417 min</div>
-    </div>
-    <div class="metric">
-      <div class="mlabel">SRT compliance</div>
-      <div class="mval" style="color:${color(srtRate)}">${srtRate}%</div>
-      <div class="msub">${srtGood.length}/${srtAll.length} GOOD \u00b7 target \u226515 min before SRT</div>
-    </div>
-    <div class="metric">
-      <div class="mlabel">Total idle compliance</div>
-      <div class="mval" style="color:${color(tiRate)}">${tiRate}%</div>
-      <div class="msub">${tiGood.length}/${tiAll.length} GOOD \u00b7 avg ${tiAvg} min \u00b7 target \u226437 min</div>
+  </div>
+
+  <!-- SECONDARY METRICS: Quick Start + Quick Sail (smaller) -->
+  <div class="card">
+    <div class="ctitle">Idle time breakdown</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:8px 0">
+      <div style="text-align:center">
+        <div style="font-size:11px;font-weight:500;color:#6b6b67;margin-bottom:6px">Quick Start</div>
+        <div style="position:relative;width:110px;height:110px;margin:0 auto">
+          <canvas id="ch-qs" role="img" aria-label="Quick Start: ${qsRate}%"></canvas>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
+            <div style="font-size:20px;font-weight:600;color:${col(qsRate)}">${qsRate}%</div>
+          </div>
+        </div>
+        <div style="font-size:10px;color:#6b6b67;margin-top:6px">${qsGood.length}/${qsAll.length} GOOD &nbsp;\u00b7&nbsp; avg ${qsAvg} min</div>
+        <div style="font-size:10px;color:#6b6b67">target \u2264 20 min</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:11px;font-weight:500;color:#6b6b67;margin-bottom:6px">Quick Sail</div>
+        <div style="position:relative;width:110px;height:110px;margin:0 auto">
+          <canvas id="ch-qsail" role="img" aria-label="Quick Sail: ${qsailRate}%"></canvas>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
+            <div style="font-size:20px;font-weight:600;color:${col(qsailRate)}">${qsailRate}%</div>
+          </div>
+        </div>
+        <div style="font-size:10px;color:#6b6b67;margin-top:6px">${qsailGood.length}/${qsailAll.length} GOOD &nbsp;\u00b7&nbsp; avg ${qsailAvg} min</div>
+        <div style="font-size:10px;color:#6b6b67">target \u2264 17 min</div>
+      </div>
     </div>
   </div>
 
   ${done.length < 1 ? `<div class="card empty">Complete some records to see analytics.</div>` : `
   <div class="card">
     <div class="ctitle">Quick Start vs Quick Sail \u2014 last 10 vessels</div>
-    <div style="position:relative;width:100%;height:220px"><canvas id="ch-qs" role="img" aria-label="Quick Start vs Quick Sail chart"></canvas></div>
+    <div style="position:relative;width:100%;height:220px"><canvas id="ch-bar" role="img" aria-label="Quick Start vs Quick Sail bar chart"></canvas></div>
   </div>
   <div class="card">
-    <div class="ctitle">SRT compliance</div>
-    <div style="display:flex;gap:16px;font-size:11px;color:#6b6b67;margin-bottom:8px;flex-wrap:wrap">
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#639922;display:inline-block"></span>GOOD (${srtGood.length})</span>
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:#E24B4A;display:inline-block"></span>NOT QUALITY (${srtAll.length-srtGood.length})</span>
-    </div>
-    <div style="position:relative;width:100%;height:170px"><canvas id="ch-srt" role="img" aria-label="SRT compliance chart"></canvas></div>
-  </div>
-  <div class="card">
-    <div class="ctitle">Recent completed records</div>
+    <div class="ctitle">Recent completed records (last 30)</div>
     <div class="table-wrap">
     <table>
       <thead><tr>
         <th>Date</th><th>Vessel</th><th>Q.Start</th><th>Q.Sail</th><th>Total Idle</th><th>SRT</th>
       </tr></thead>
-      <tbody>${done.slice(0,10).map(r=>`<tr>
+      <tbody>${done.slice(0,30).map(r=>`<tr>
         <td style="font-family:monospace">${new Date(r.created_at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'})}</td>
         <td>${r.vessel_name}</td>
         <td><span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_minutes}m</span></td>
@@ -775,17 +826,34 @@ function renderDashboard(tb) {
     </div>
   </div>`}`;
 
-  if (done.length >= 1) {
-    setTimeout(() => {
+  // ── INIT CHARTS ──
+  setTimeout(() => {
+    const initDonut = (id, good, total, c1, c2) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      new Chart(el, {
+        type: 'doughnut',
+        data: { datasets: [{ data: total===0?[1,0]:[good, Math.max(0,total-good)], backgroundColor: total===0?['#e5e5e5','#e5e5e5']:[c1||'#639922', c2||'#E24B4A'], borderWidth: 0 }] },
+        options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false}, tooltip:{enabled:total>0} }, cutout:'68%' }
+      });
+    };
+
+    initDonut('ch-srt',   srtGood.length,   srtAll.length);
+    initDonut('ch-ti',    tiGood.length,    tiAll.length);
+    initDonut('ch-qs',    qsGood.length,    qsAll.length);
+    initDonut('ch-qsail', qsailGood.length, qsailAll.length);
+
+    if (done.length >= 1) {
       const last10 = done.slice(0,10).reverse();
-      if (document.getElementById('ch-qs')) {
-        new Chart(document.getElementById('ch-qs'), {
+      const bar = document.getElementById('ch-bar');
+      if (bar) {
+        new Chart(bar, {
           type: 'bar',
           data: {
             labels: last10.map(r=>r.vessel_name.slice(0,8)),
             datasets: [
-              { label:'Quick Start', data: last10.map(r=>r.quick_start_minutes), backgroundColor:'#378ADD', borderRadius:3, borderWidth:0 },
-              { label:'Quick Sail', data: last10.map(r=>r.quick_sail_minutes), backgroundColor:'#F58220', borderRadius:3, borderWidth:0 }
+              { label:'Quick Start', data:last10.map(r=>r.quick_start_minutes), backgroundColor:'#378ADD', borderRadius:3, borderWidth:0 },
+              { label:'Quick Sail',  data:last10.map(r=>r.quick_sail_minutes),  backgroundColor:'#F58220', borderRadius:3, borderWidth:0 }
             ]
           },
           options: { responsive:true, maintainAspectRatio:false,
@@ -797,30 +865,21 @@ function renderDashboard(tb) {
           }
         });
       }
-      if (document.getElementById('ch-srt')) {
-        new Chart(document.getElementById('ch-srt'), {
-          type: 'doughnut',
-          data: { labels:['GOOD','NOT QUALITY'], datasets:[{ data:[srtGood.length,srtAll.length-srtGood.length], backgroundColor:['#639922','#E24B4A'], borderWidth:0 }] },
-          options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, cutout:'65%' }
-        });
-      }
-    }, 150);
-  }
+    }
+  }, 150);
 }
 
 // ── GLOBAL HANDLERS ──
 window.doLogin = function() {
   const v = document.getElementById('op-inp')?.value.trim().toUpperCase();
   if (!v) { alert('Please enter your employee ID.'); return; }
-  S.operator = v;
-  localStorage.setItem('ptp_op', v);
+  S.operator = v; localStorage.setItem('ptp_op', v);
   loadRecords().then(()=>R());
 };
 window.doLogout = function() { S.operator=''; S.records=[]; localStorage.removeItem('ptp_op'); R(); };
 window.setTab = function(t) {
-  S.tab=t; S.predResult=null;
-  R();
-  if (t==='records'||t==='dashboard'||t==='prediction'||t==='actual') loadRecords();
+  S.tab=t; S.predResult=null; R();
+  if (['records','dashboard','prediction','actual'].includes(t)) loadRecords();
 };
 window.toggleRecExp = function(id) { S.expandRecId = S.expandRecId===id?null:id; renderTab(); };
 
