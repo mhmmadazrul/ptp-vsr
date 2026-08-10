@@ -298,7 +298,7 @@ function renderArrival(tb) {
     </div>
     <div class="info-box" style="margin-bottom:9px">
       Quick Start = First Lift \u2212 RTW &nbsp;\u00b7&nbsp; Target \u2264 20 min<br>
-      <strong>First Lift must not be earlier than First Line or RTW.</strong>
+      <strong>⚠️ First Lift must not be earlier than First Line or RTW.</strong>
     </div>
     <button class="btn" onclick="calcArrival()">Calculate arrival</button>
     <div id="arr-result" style="margin-top:9px"></div>
@@ -576,7 +576,7 @@ function renderActual(tb) {
       <div class="info-box" style="margin-bottom:9px">
         Quick Sail = Last Line \u2212 Last Lift &nbsp;\u00b7&nbsp; Target \u2264 17 min<br>
         Total Idle = Quick Start + Quick Sail &nbsp;\u00b7&nbsp; Target \u2264 37 min<br>
-        <strong>Last Line cannot be earlier than Last Lift.</strong>
+        <strong>⚠️ Last Line cannot be earlier than Last Lift.</strong>
       </div>
       <div class="fi" style="margin-bottom:9px">
         <label>Remarks <span style="font-size:10px;color:#6b6b67">(mandatory)</span></label>
@@ -660,7 +660,7 @@ function renderRecordDetail(r) {
   return `<div class="expand-panel">
   <div class="ep-title">Phase 1 \u2014 Arrival</div>
   <div class="rbox" style="margin-bottom:8px">
-    <div class="rrow"><span>Vessel reference</span><span class="rval">${r.vessel_reference}</span></div>
+    <div class="rrow" style="font-size:13px"><span>Vessel reference</span><span class="rval">${r.vessel_reference}</span></div>
     <div class="rrow"><span>First line</span><span class="rval">${r.first_line_time}</span></div>
     <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${r.rtw_time}</span></div>
     <div class="rrow"><span>First lift</span><span class="rval">${r.first_lift_time}</span></div>
@@ -745,9 +745,9 @@ function renderDashboard(tb) {
   <!-- MAIN METRICS: SRT + Total Idle (larger) -->
   <div class="card">
     <div class="ctitle">Key metrics</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:8px 0">
+    <div class="donut-main">
       <div style="text-align:center">
-        <div style="font-size:12px;font-weight:500;color:#6b6b67;margin-bottom:8px">SRT Compliance</div>
+        <div style="font-size:12px;font-weight:600;color:#6b6b67;margin-bottom:8px">SRT Compliance</div>
         <div style="position:relative;width:150px;height:150px;margin:0 auto">
           <canvas id="ch-srt" role="img" aria-label="SRT compliance: ${srtRate}%"></canvas>
           <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
@@ -776,9 +776,9 @@ function renderDashboard(tb) {
   <!-- SECONDARY METRICS: Quick Start + Quick Sail (smaller) -->
   <div class="card">
     <div class="ctitle">Idle time breakdown</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:8px 0">
+    <div class="donut-secondary">
       <div style="text-align:center">
-        <div style="font-size:11px;font-weight:500;color:#6b6b67;margin-bottom:6px">Quick Start</div>
+        <div style="font-size:11px;font-weight:600;color:#6b6b67;margin-bottom:6px">Quick Start</div>
         <div style="position:relative;width:110px;height:110px;margin:0 auto">
           <canvas id="ch-qs" role="img" aria-label="Quick Start: ${qsRate}%"></canvas>
           <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
