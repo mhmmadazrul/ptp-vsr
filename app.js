@@ -298,7 +298,7 @@ function renderArrival(tb) {
     </div>
     <div class="info-box" style="margin-bottom:9px">
       Quick Start = First Lift \u2212 RTW &nbsp;\u00b7&nbsp; Target \u2264 20 min<br>
-      <strong>⚠️ First Lift must not be earlier than First Line or RTW.</strong>
+      <strong>\u26a0\ufe0f Sequence must be: First Line \u2264 RTW \u2264 First Lift</strong>
     </div>
     <button class="btn" onclick="calcArrival()">Calculate arrival</button>
     <div id="arr-result" style="margin-top:9px"></div>
@@ -323,14 +323,13 @@ window.calcArrival = function() {
   if (!ref) { alert('Please enter vessel reference.'); return; }
   if (!fl||!rtw||!fli) { alert('Please enter all three arrival times.'); return; }
 
-  // ── POKA YOKE: First Lift cannot be earlier than First Line ──
-  if (tToMins(fli) < tToMins(fl)) {
-    alert('\u26a0\ufe0f Poka Yoke: First Lift (' + fli + ') cannot be earlier than First Line (' + fl + ').\nPlease check the times entered.');
+  // ── POKA YOKE: Sequence must be First Line ≤ RTW ≤ First Lift ──
+  if (tToMins(rtw) < tToMins(fl)) {
+    alert('\u26a0\ufe0f Poka Yoke: Vessel Secured / RTW (' + rtw + ') cannot be earlier than First Line (' + fl + ').\nCorrect sequence: First Line \u2264 RTW \u2264 First Lift.');
     return;
   }
-  // ── POKA YOKE: First Lift cannot be earlier than RTW ──
   if (tToMins(fli) < tToMins(rtw)) {
-    alert('\u26a0\ufe0f Poka Yoke: First Lift (' + fli + ') cannot be earlier than Vessel Secured / RTW (' + rtw + ').\nPlease check the times entered.');
+    alert('\u26a0\ufe0f Poka Yoke: First Lift (' + fli + ') cannot be earlier than Vessel Secured / RTW (' + rtw + ').\nCorrect sequence: First Line \u2264 RTW \u2264 First Lift.');
     return;
   }
 
@@ -824,6 +823,16 @@ function renderDashboard(tb) {
       </tr>`).join('')}</tbody>
     </table>
     </div>
+  </div>
+  <div class="card">
+    <div class="ctitle">Download report</div>
+    <div style="font-size:12px;color:#6b6b67;margin-bottom:10px">
+      Export all completed records with every field as a CSV file. Filtered by month/week if active.
+    </div>
+    <button class="btn" onclick="downloadReport()" style="background:#185FA5">
+      <i class="ti ti-download" style="font-size:15px;vertical-align:-2px;margin-right:6px"></i>
+      Download CSV report
+    </button>
   </div>`}`;
 
   // ── INIT CHARTS ──
@@ -868,6 +877,95 @@ function renderDashboard(tb) {
     }
   }, 150);
 }
+
+// ── DOWNLOAD REPORT ──
+window.downloadReport = function() {
+  let base = S.records;
+  if (S.monthFilter !== 'all') base = base.filter(r => getMonthKey(new Date(r.created_at)) === S.monthFilter);
+  if (S.weekFilter !== 'all') base = base.filter(r => getWeekKey(new Date(r.created_at)) === S.weekFilter);
+  const done = base.filter(r => r.actual_last_lift_time);
+  if (!done.length) { alert('No completed records to export for the selected filter.'); return; }
+
+  const cols = [
+    { key:'id',                       label:'ID' },
+    { key:'created_at',               label:'Created At', fmt: v => v ? new Date(v).toLocaleString('en-GB') : '' },
+    { key:'operator_id',              label:'Operator ID' },
+    // Vessel
+    { key:'vessel_name',              label:'Vessel Name' },
+    { key:'vessel_reference',         label:'Vessel Reference' },
+    // Phase 1 Arrival
+    { key:'first_line_time',          label:'First Line Time' },
+    { key:'rtw_time',                 label:'RTW Time' },
+    { key:'first_lift_time',          label:'First Lift Time' },
+    { key:'quick_start_minutes',      label:'Quick Start (min)' },
+    { key:'quick_start_class',        label:'Quick Start Class' },
+    { key:'arrival_remarks',          label:'Arrival Remarks' },
+    // Phase 2 Prediction
+    { key:'qc_number',                label:'QC Number' },
+    { key:'qc_model',                 label:'QC Model' },
+    { key:'qc_speed',                 label:'QC Speed (m/min)' },
+    { key:'cmph',                     label:'CMPH' },
+    { key:'f1',                       label:'Normal Container (Unit)' },
+    { key:'f2',                       label:'Twin Lift (Unit)' },
+    { key:'f3',                       label:'Gearbox (Unit)' },
+    { key:'f4',                       label:'Hatch Cover (Unit)' },
+    { key:'f5',                       label:'OOG (Unit)' },
+    { key:'f6',                       label:'Open Top (Unit)' },
+    { key:'f7',                       label:'Gantry Movement (Bay)' },
+    { key:'f8',                       label:'Breakdown (Min)' },
+    { key:'container_min',            label:'Container Work Time (min)' },
+    { key:'gantry_min',               label:'Gantry Travel Time (min)' },
+    { key:'buffer_min',               label:'Breakdown Buffer (min)' },
+    { key:'total_min',                label:'Total Operation Time (min)' },
+    { key:'predicted_last_lift_time', label:'Predicted Last Lift' },
+    { key:'suggested_srt',            label:'Suggested SRT' },
+    { key:'prediction_remarks',       label:'Prediction Remarks' },
+    { key:'prediction_operator',      label:'Prediction Operator' },
+    // Phase 3 Actual
+    { key:'actual_last_lift_time',    label:'Actual Last Lift' },
+    { key:'actual_pilot_onboard_time',label:'Pilot Onboard' },
+    { key:'actual_srt_time',          label:'Actual SRT' },
+    { key:'last_line_time',           label:'Last Line Time' },
+    { key:'srt_window_start',         label:'SRT Window Start' },
+    { key:'srt_window_end',           label:'SRT Window End' },
+    { key:'srt_class',                label:'SRT Class' },
+    { key:'deviation_minutes',        label:'LL Deviation (min)' },
+    { key:'quick_sail_minutes',       label:'Quick Sail (min)' },
+    { key:'quick_sail_class',         label:'Quick Sail Class' },
+    { key:'total_idle_minutes',       label:'Total Idle (min)' },
+    { key:'total_idle_class',         label:'Total Idle Class' },
+    { key:'departure_remarks',        label:'Departure Remarks' },
+    { key:'departure_operator',       label:'Departure Operator' },
+  ];
+
+  const escape = v => {
+    if (v === null || v === undefined) return '';
+    const str = String(v);
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  };
+
+  const header = cols.map(c => escape(c.label)).join(',');
+  const rows = done.map(r =>
+    cols.map(c => escape(c.fmt ? c.fmt(r[c.key]) : r[c.key])).join(',')
+  );
+
+  const csv = [header, ...rows].join('\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0,10);
+  const filterStr = S.weekFilter !== 'all' ? '_' + S.weekFilter : S.monthFilter !== 'all' ? '_' + S.monthFilter : '';
+  a.href = url;
+  a.download = `VSR_Report${filterStr}_${dateStr}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
 
 // ── GLOBAL HANDLERS ──
 window.doLogin = function() {
