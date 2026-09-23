@@ -4,11 +4,17 @@ async function loadQCDatabase() {
   try {
     const { data, error } = await window.sb.from('qc_database').select('*').order('qc_number');
     if (error) throw error;
-    QC_DB = (data || []).map(r => ({
-      qc: r.qc_number,
-      model: r.model,
-      speed: r.travel_speed_mpm
-    }));
+    QC_DB = (data || [])
+  .sort((a, b) => {
+    const numA = parseInt(a.qc_number.replace(/\D/g, ''));
+    const numB = parseInt(b.qc_number.replace(/\D/g, ''));
+    return numA - numB;
+  })
+  .map(r => ({
+    qc: r.qc_number,
+    model: r.model,
+    speed: r.travel_speed_mpm
+  }));
   } catch(e) {
     console.error('Failed to load QC database:', e);
     QC_DB = [];
