@@ -38,9 +38,6 @@ let S = {
 const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 const addMin = (d, m) => new Date(d.getTime() + m * 60000);
 const toHM = d => d.toTimeString().slice(0,5);
-const parseT = s => { const [h,m] = s.split(':'); const d = new Date(); d.setHours(+h,+m,0,0); return d; };
-const minDiff = (a, b) => Math.round((parseT(b) - parseT(a)) / 60000);
-const tToMins = s => { const [h,m] = s.split(':'); return +h*60 + +m; };
 
 // ── ISO WEEK / MONTH HELPERS ──
 function getISOWeek(date) {
@@ -93,12 +90,6 @@ function roundUpTo15(d) {
 }
 
 // ── CLASSIFICATION ──
-function classifySRT(srtTime, actualLastLift) {
-  const srt = parseT(srtTime);
-  const actual = parseT(actualLastLift);
-  const windowStart = addMin(srt, -15);
-  return (actual >= windowStart && actual <= srt) ? 'GOOD' : 'NOT QUALITY';
-}
 function classifyQS(mins, target) { return mins <= target ? 'GOOD' : 'NOT QUALITY'; }
 
 // ── DB ──
@@ -116,9 +107,18 @@ async function loadRecords() {
   renderTab();
 }
 
+// Safety net: if the date-time (*_at) columns haven't been added in Supabase yet,
+// retry without them so saving never breaks. Run migration_add_datetimes.sql to enable them.
+const isMissingCol = e => e && (e.code === 'PGRST204' || /column|schema cache/i.test(e.message || ''));
+const stripAt = o => Object.fromEntries(Object.entries(o).filter(([k]) => !(k.endsWith('_at') && k !== 'created_at')));
+
 async function dbInsert(rec) {
   try {
-    const { error } = await window.sb.from('vsr_records').insert([rec]);
+    let { error } = await window.sb.from('vsr_records').insert([rec]);
+    if (isMissingCol(error)) {
+      console.warn('Date-time columns missing \u2014 saved without them. Run migration_add_datetimes.sql.');
+      ({ error } = await window.sb.from('vsr_records').insert([stripAt(rec)]));
+    }
     if (error) throw error;
     return true;
   } catch(e) { alert('Save failed: ' + e.message); return false; }
@@ -126,7 +126,11 @@ async function dbInsert(rec) {
 
 async function dbUpdate(id, updates) {
   try {
-    const { error } = await window.sb.from('vsr_records').update(updates).eq('id', id);
+    let { error } = await window.sb.from('vsr_records').update(updates).eq('id', id);
+    if (isMissingCol(error)) {
+      console.warn('Date-time columns missing \u2014 saved without them. Run migration_add_datetimes.sql.');
+      ({ error } = await window.sb.from('vsr_records').update(stripAt(updates)).eq('id', id));
+    }
     if (error) throw error;
     return true;
   } catch(e) { alert('Update failed: ' + e.message); return false; }
@@ -171,14 +175,142 @@ function updatePredHints() {
   if (hc) hc.textContent = cmph > 0 ? (60/cmph).toFixed(2)+' min per move' : '';
 }
 
-// ── TIME INPUT HELPER ──
-function hhInput(id) {
-  return `<div class="iw" style="gap:0">
-    <input type="number" id="${id}-h" placeholder="HH" min="0" max="23" maxlength="2" style="text-align:center;flex:1" oninput="hhAdv(this,'${id}-m')">
-    <span style="padding:0 4px;color:#6b6b67;font-size:16px;flex-shrink:0">:</span>
-    <input type="number" id="${id}-m" placeholder="MM" min="0" max="59" maxlength="2" style="text-align:center;flex:1">
+// ── DATE + TIME HELPERS ──
+// Each time field carries a date. Dates are pre-filled and inferred automatically:
+//  • First field of a group: today (or yesterday if the time would be >60 min in the future).
+//  • Later fields: the date that puts the time closest to the previous filled field (±12h).
+//    e.g. 23:55 → 00:05 becomes next day; RTW 10:10 → First Lift 10:04 stays same day.
+//  • Once the operator picks a date manually, that field is never auto-changed again.
+const DT_GROUPS = {
+  arr: ['a-fl','a-rtw','a-fli'],
+  dep: ['d-ll','d-po','d-srt','d-ll2']
+};
+let DT = {};   // { fieldId: { date:'YYYY-MM-DD', manual:bool } }
+
+const pad2 = n => String(n).padStart(2,'0');
+const ymd = d => d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate());
+const shiftYmd = (s, days) => { const d = new Date(s + 'T12:00'); d.setDate(d.getDate() + days); return ymd(d); };
+const mkDT = (dateStr, hm) => new Date(dateStr + 'T' + hm);
+const diffMin = (a, b) => Math.round((b - a) / 60000);          // b − a in minutes (Date objects)
+const WD = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const MO = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const fmtDay = s => { const d = new Date(s + 'T12:00'); return WD[d.getDay()] + ' ' + d.getDate() + ' ' + MO[d.getMonth()]; };
+const fmtDT = d => toHM(d) + ' \u00b7 ' + d.getDate() + ' ' + MO[d.getMonth()];
+
+// Pick the calendar date that places hm nearest to the anchor Date
+function nearestDate(hm, anchor) {
+  const base = ymd(anchor);
+  let best = base, bestGap = Infinity;
+  [-1, 0, 1].forEach(k => {
+    const d = shiftYmd(base, k);
+    const gap = Math.abs(mkDT(d, hm) - anchor);
+    if (gap < bestGap) { bestGap = gap; best = d; }
+  });
+  return best;
+}
+
+function groupOf(id) { return Object.keys(DT_GROUPS).find(g => DT_GROUPS[g].includes(id)); }
+
+function initDTGroup(g) { DT_GROUPS[g].forEach(id => { DT[id] = { date: ymd(new Date()), manual: false }; }); }
+
+// Re-infer every non-manual date in a group, in field order
+function dtSync(g) {
+  let anchor = null;
+  DT_GROUPS[g].forEach(id => {
+    const st = DT[id] || (DT[id] = { date: ymd(new Date()), manual: false });
+    const hm = readHM(id);
+    if (!st.manual) {
+      const prev = st.date;
+      if (hm && anchor) st.date = nearestDate(hm, anchor);
+      else if (hm) {
+        const today = ymd(new Date());
+        st.date = (mkDT(today, hm) - new Date() > 60 * 60000) ? shiftYmd(today, -1) : today;
+      } else st.date = anchor ? ymd(anchor) : ymd(new Date());
+      if (prev !== st.date) st.flash = true;
+    }
+    if (hm) anchor = mkDT(st.date, hm);
+  });
+  DT_GROUPS[g].forEach(paintChip);
+}
+
+function paintChip(id) {
+  const el = document.getElementById(id + '-dc');
+  const st = DT[id];
+  if (!el || !st) return;
+  const g = groupOf(id);
+  const ref = DT[DT_GROUPS[g][0]].date;
+  const delta = Math.round((new Date(st.date + 'T12:00') - new Date(ref + 'T12:00')) / 86400000);
+  const shifted = delta !== 0 && DT_GROUPS[g][0] !== id;
+  el.innerHTML = `<i class="ti ti-calendar"></i>${fmtDay(st.date)}${shifted ? `<span class="dchip-d">${delta>0?'+':''}${delta}d</span>` : ''}`;
+  el.classList.toggle('shifted', shifted);
+  el.title = st.manual ? 'Date set manually — tap to change' : 'Date auto-filled — tap to change';
+  if (st.flash) {
+    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+    st.flash = false;
+  }
+}
+
+// Date chip popover: Yesterday / Today / Tomorrow / Pick date…
+window.openDatePop = function(id, ev) {
+  ev && ev.stopPropagation();
+  closeDatePop();
+  const chip = document.getElementById(id + '-dc');
+  const today = ymd(new Date());
+  const opts = [['Yesterday', shiftYmd(today,-1)], ['Today', today], ['Tomorrow', shiftYmd(today,1)]];
+  const pop = document.createElement('div');
+  pop.className = 'dpop'; pop.id = 'dpop';
+  pop.innerHTML = opts.map(([lbl, d]) =>
+    `<button type="button" class="${DT[id].date===d?'on':''}" onclick="setDTDate('${id}','${d}')">${lbl}<span>${fmtDay(d)}</span></button>`
+  ).join('') +
+    `<label class="dpop-pick"><i class="ti ti-calendar-search"></i>Pick date…
+      <input type="date" value="${DT[id].date}" onclick="try{this.showPicker()}catch(e){}" onchange="if(this.value)setDTDate('${id}',this.value)"></label>` +
+    (DT[id].manual ? `<button type="button" class="dpop-auto" onclick="resetDTDate('${id}')"><i class="ti ti-wand"></i>Back to auto</button>` : '');
+  document.body.appendChild(pop);
+  const r = chip.getBoundingClientRect();
+  const w = pop.offsetWidth;
+  pop.style.top = (window.scrollY + r.bottom + 4) + 'px';
+  pop.style.left = Math.max(8, Math.min(window.scrollX + r.right - w, window.scrollX + document.documentElement.clientWidth - w - 8)) + 'px';
+};
+window.closeDatePop = function() { document.getElementById('dpop')?.remove(); };
+window.setDTDate = function(id, d) { DT[id].date = d; DT[id].manual = true; closeDatePop(); dtSync(groupOf(id)); };
+window.resetDTDate = function(id) { DT[id].manual = false; closeDatePop(); dtSync(groupOf(id)); };
+document.addEventListener('click', e => { if (!e.target.closest('#dpop')) closeDatePop(); });
+window.addEventListener('resize', () => closeDatePop());
+
+// Read a field as { hm:'HH:MM', date:'YYYY-MM-DD', dt:Date } or null
+function readDT(id) {
+  const hm = readHM(id);
+  if (!hm) return null;
+  const date = (DT[id] && DT[id].date) || ymd(new Date());
+  return { hm, date, dt: mkDT(date, hm) };
+}
+
+// Datetime of a stored record field; legacy rows (no *_at) are inferred near an anchor
+function recDT(r, atKey, hmKey, anchor) {
+  if (r[atKey]) return new Date(r[atKey]);
+  if (!r[hmKey]) return null;
+  const a = anchor || new Date(r.created_at);
+  return mkDT(nearestDate(r[hmKey], a), r[hmKey]);
+}
+
+// ── TIME INPUT ──
+function fieldTime(id, label) {
+  return `<div class="fi">
+    <div class="lrow"><label>${label}</label>
+      <button type="button" class="dchip" id="${id}-dc" onclick="openDatePop('${id}',event)"></button></div>
+    ${hhInput(id)}
   </div>`;
 }
+
+function hhInput(id) {
+  return `<div class="iw" style="gap:0">
+    <input type="number" id="${id}-h" placeholder="HH" min="0" max="23" maxlength="2" style="text-align:center;flex:1" oninput="hhAdv(this,'${id}-m');onTimeInput('${id}')">
+    <span style="padding:0 4px;color:#6b6b67;font-size:16px;flex-shrink:0">:</span>
+    <input type="number" id="${id}-m" placeholder="MM" min="0" max="59" maxlength="2" style="text-align:center;flex:1" oninput="onTimeInput('${id}')">
+  </div>`;
+}
+
+window.onTimeInput = function(id) { const g = groupOf(id); if (g) dtSync(g); };
 
 function readHM(id) {
   const h = document.getElementById(id+'-h')?.value;
@@ -298,13 +430,14 @@ function renderArrival(tb) {
   <div class="card">
     <div class="ctitle">Arrival times</div>
     <div class="g3" style="margin-bottom:9px">
-      <div class="fi"><label>First line</label>${hhInput('a-fl')}</div>
-      <div class="fi"><label>Vessel secured (RTW)</label>${hhInput('a-rtw')}</div>
-      <div class="fi"><label>First lift</label>${hhInput('a-fli')}</div>
+      ${fieldTime('a-fl','First line')}
+      ${fieldTime('a-rtw','Vessel secured (RTW)')}
+      ${fieldTime('a-fli','First lift')}
     </div>
     <div class="info-box" style="margin-bottom:9px">
       Quick Start = First Lift \u2212 RTW &nbsp;\u00b7&nbsp; Target \u2264 20 min<br>
-      <strong>\u26a0\ufe0f Sequence must be: First Line \u2264 RTW \u2264 First Lift</strong>
+      <strong>\u26a0\ufe0f First Line must not be later than RTW.</strong> First Lift before RTW is allowed (Quick Start goes negative).<br>
+      <span style="opacity:.8">Dates fill in automatically, including past midnight. Tap a date to change it.</span>
     </div>
     <button class="btn" onclick="calcArrival()">Calculate arrival</button>
     <div id="arr-result" style="margin-top:9px"></div>
@@ -317,41 +450,42 @@ function renderArrival(tb) {
     </div>
     <button class="btn btn-green" onclick="saveArrival()">Save arrival record</button>
   </div>`;
+  initDTGroup('arr');
+  dtSync('arr');
 }
 
 window.calcArrival = function() {
   const vessel = document.getElementById('a-vessel')?.value.trim().toUpperCase();
   const ref = document.getElementById('a-ref')?.value.trim();
-  const fl = readHM('a-fl');
-  const rtw = readHM('a-rtw');
-  const fli = readHM('a-fli');
+  const fl = readDT('a-fl');
+  const rtw = readDT('a-rtw');
+  const fli = readDT('a-fli');
   if (!vessel) { alert('Please enter vessel name.'); return; }
   if (!ref) { alert('Please enter vessel reference.'); return; }
   if (!fl||!rtw||!fli) { alert('Please enter all three arrival times.'); return; }
 
-  // ── POKA YOKE: Sequence must be First Line ≤ RTW ≤ First Lift ──
-  if (tToMins(rtw) < tToMins(fl)) {
-    alert('\u26a0\ufe0f Poka Yoke: Vessel Secured / RTW (' + rtw + ') cannot be earlier than First Line (' + fl + ').\nCorrect sequence: First Line \u2264 RTW \u2264 First Lift.');
-    return;
-  }
-  if (tToMins(fli) < tToMins(rtw)) {
-    alert('\u26a0\ufe0f Poka Yoke: First Lift (' + fli + ') cannot be earlier than Vessel Secured / RTW (' + rtw + ').\nCorrect sequence: First Line \u2264 RTW \u2264 First Lift.');
+  // ── POKA YOKE: First Line ≤ RTW (date-aware). First Lift may precede RTW (negative Quick Start). ──
+  if (rtw.dt < fl.dt) {
+    alert('\u26a0\ufe0f Poka Yoke: Vessel Secured / RTW (' + fmtDT(rtw.dt) + ') cannot be earlier than First Line (' + fmtDT(fl.dt) + ').\nPlease check the times and dates.');
     return;
   }
 
-  const qs = minDiff(rtw, fli);
+  const qs = diffMin(rtw.dt, fli.dt);
   const qsClass = classifyQS(qs, 20);
-  S.arrForm = { vessel, reference:ref, first_line:fl, rtw, first_lift:fli, quick_start:qs, qs_class:qsClass };
+  S.arrForm = { vessel, reference:ref, first_line:fl.hm, rtw:rtw.hm, first_lift:fli.hm,
+    first_line_at:fl.dt.toISOString(), rtw_at:rtw.dt.toISOString(), first_lift_at:fli.dt.toISOString(),
+    quick_start:qs, qs_class:qsClass };
 
   const res = document.getElementById('arr-result');
   res.innerHTML = `
   <div class="rbox">
-    <div class="rrow"><span>First line</span><span class="rval">${fl}</span></div>
-    <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${rtw}</span></div>
-    <div class="rrow"><span>First lift</span><span class="rval">${fli}</span></div>
+    <div class="rrow"><span>First line</span><span class="rval">${fmtDT(fl.dt)}</span></div>
+    <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${fmtDT(rtw.dt)}</span></div>
+    <div class="rrow"><span>First lift</span><span class="rval">${fmtDT(fli.dt)}</span></div>
     <div class="rrow" style="font-weight:500"><span>Quick Start (First Lift \u2212 RTW)</span>
       <span class="rval">${qs} min &nbsp;<span class="badge ${qsClass==='GOOD'?'bg':'bb'}">${qsClass}</span></span>
     </div>
+    ${qs < 0 ? `<div class="early-note"><i class="ti ti-info-circle"></i>First Lift is ${-qs} min before RTW. Negative Quick Start will be recorded. Please explain in remarks.</div>` : ''}
   </div>`;
   document.getElementById('arr-save-card').style.display = 'block';
 };
@@ -367,6 +501,9 @@ window.saveArrival = async function() {
     first_line_time: f.first_line,
     rtw_time: f.rtw,
     first_lift_time: f.first_lift,
+    first_line_at: f.first_line_at,
+    rtw_at: f.rtw_at,
+    first_lift_at: f.first_lift_at,
     quick_start_minutes: f.quick_start,
     quick_start_class: f.qs_class,
     arrival_remarks: rem,
@@ -479,6 +616,19 @@ function renderPrediction(tb) {
   </div>` : ''}`;
 }
 
+// Stored time with its date when available (records saved before dates show time only)
+function showAt(r, atKey, hmKey) {
+  if (r[atKey]) return fmtDT(new Date(r[atKey]));
+  return r[hmKey] || '';
+}
+
+// Small date line under a big time, shown only when it isn't today
+function dayTag(iso) {
+  const d = new Date(iso);
+  if (ymd(d) === ymd(new Date())) return '';
+  return `<div class="daytag">${fmtDay(ymd(d))}</div>`;
+}
+
 function renderPredResult() {
   const r = S.predResult;
   return `<div class="sep"></div>
@@ -491,11 +641,11 @@ function renderPredResult() {
   </div>
   <div class="hrow">
     <div><div style="font-size:12px;color:#6b6b67">Predicted last lift</div><div style="font-size:10px;color:#6b6b67;margin-top:2px">Now + total operation time</div></div>
-    <span class="bigtime" style="color:#185FA5">${r.lastLiftStr}</span>
+    <span style="text-align:right"><span class="bigtime" style="color:#185FA5">${r.lastLiftStr}</span>${dayTag(r.lastLiftAt)}</span>
   </div>
   <div class="hrow">
     <div><div style="font-size:12px;color:#6b6b67">Recommended SRT</div><div style="font-size:10px;color:#6b6b67;margin-top:2px">Rounded up to next 15 min mark</div></div>
-    <span class="bigtime" style="color:#0F6E56">${r.srtStr}</span>
+    <span style="text-align:right"><span class="bigtime" style="color:#0F6E56">${r.srtStr}</span>${dayTag(r.srtAt)}</span>
   </div>
   <div class="info-box">SRT is GOOD if actual last lift falls within 15 min before SRT (up to SRT itself).</div>
   <div class="sep"></div>
@@ -518,7 +668,8 @@ window.doPredCalc = function() {
   const now = new Date();
   const lastLift = addMin(now, res.totalMin);
   const srtTime = roundUpTo15(lastLift);
-  S.predResult = { ...res, lastLiftStr: toHM(lastLift), srtStr: toHM(srtTime) };
+  S.predResult = { ...res, lastLiftStr: toHM(lastLift), srtStr: toHM(srtTime),
+    lastLiftAt: lastLift.toISOString(), srtAt: srtTime.toISOString() };
   renderTab();
   setTimeout(()=>{ const el=document.querySelector('.hrow'); if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); },100);
 };
@@ -532,6 +683,7 @@ window.savePrediction = async function() {
     f1:+f.f1,f2:+f.f2,f3:+f.f3,f4:+f.f4,f5:+f.f5,f6:+f.f6,f7:+f.f7,f8:+f.f8,
     container_min: r.containerMin, gantry_min: r.gantryMin, buffer_min: r.bufferMin, total_min: r.totalMin,
     predicted_last_lift_time: r.lastLiftStr, suggested_srt: r.srtStr,
+    predicted_last_lift_at: r.lastLiftAt, suggested_srt_at: r.srtAt,
     prediction_remarks: rem, prediction_operator: S.operator
   });
   if (!ok) return;
@@ -565,23 +717,24 @@ function renderActual(tb) {
         <div class="rrow"><span>Vessel</span><span class="rval">${r.vessel_name}</span></div>
         <div class="rrow"><span>Reference</span><span class="rval">${r.vessel_reference}</span></div>
         <div class="rrow"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
-        <div class="rrow"><span>Predicted last lift</span><span class="rval" style="color:#185FA5">${r.predicted_last_lift_time}</span></div>
-        <div class="rrow"><span>Recommended SRT</span><span class="rval" style="color:#0F6E56">${r.suggested_srt}</span></div>
+        <div class="rrow"><span>Predicted last lift</span><span class="rval" style="color:#185FA5">${showAt(r,'predicted_last_lift_at','predicted_last_lift_time')}</span></div>
+        <div class="rrow"><span>Recommended SRT</span><span class="rval" style="color:#0F6E56">${showAt(r,'suggested_srt_at','suggested_srt')}</span></div>
       </div>
       <div class="sep"></div>
       <div class="ctitle">Actual departure times</div>
       <div class="time-group">
-        <div class="fi"><label>Actual last lift</label>${hhInput('d-ll')}</div>
-        <div class="fi"><label>Pilot onboard</label>${hhInput('d-po')}</div>
-        <div class="fi"><label>Actual SRT</label>${hhInput('d-srt')}</div>
+        ${fieldTime('d-ll','Actual last lift')}
+        ${fieldTime('d-po','Pilot onboard')}
+        ${fieldTime('d-srt','Actual SRT')}
       </div>
       <div class="g2" style="margin-bottom:9px">
-        <div class="fi"><label>Last line</label>${hhInput('d-ll2')}</div>
+        ${fieldTime('d-ll2','Last line')}
       </div>
       <div class="info-box" style="margin-bottom:9px">
         Quick Sail = Last Line \u2212 Last Lift &nbsp;\u00b7&nbsp; Target \u2264 17 min<br>
         Total Idle = Quick Start + Quick Sail &nbsp;\u00b7&nbsp; Target \u2264 37 min<br>
-        <strong>⚠️ Last Line cannot be earlier than Last Lift.</strong>
+        <strong>⚠️ Last Line cannot be earlier than Last Lift.</strong><br>
+        <span style="opacity:.8">Dates fill in automatically, including past midnight. Tap a date to change it.</span>
       </div>
       <div class="fi" style="margin-bottom:9px">
         <label>Remarks <span style="font-size:10px;color:#6b6b67">(mandatory)</span></label>
@@ -590,35 +743,42 @@ function renderActual(tb) {
       <button class="btn btn-green" onclick="saveActual('${r.id}', ${r.quick_start_minutes})">Save actual departure</button>`;
     })() : ''}`}
   </div>`;
+  if (document.getElementById('d-ll-h')) { initDTGroup('dep'); dtSync('dep'); }
 }
 
 window.saveActual = async function(id, quickStart) {
-  const ll = readHM('d-ll');
-  const po = readHM('d-po');
-  const srt = readHM('d-srt');
-  const lastLine = readHM('d-ll2');
+  const ll = readDT('d-ll');
+  const po = readDT('d-po');
+  const srt = readDT('d-srt');
+  const lastLine = readDT('d-ll2');
   const rem = document.getElementById('act-rem')?.value.trim();
   if (!ll||!po||!srt||!lastLine) { alert('All four time fields are mandatory.'); return; }
   if (!rem) { alert('Remarks are mandatory.'); return; }
 
-  // ── POKA YOKE: Last Line cannot be earlier than Last Lift ──
-  if (tToMins(lastLine) < tToMins(ll)) {
-    alert('\u26a0\ufe0f Poka Yoke: Last Line (' + lastLine + ') cannot be earlier than Last Lift (' + ll + ').\nPlease check the times entered.');
+  // ── POKA YOKE: Last Line cannot be earlier than Last Lift (date-aware) ──
+  if (lastLine.dt < ll.dt) {
+    alert('\u26a0\ufe0f Poka Yoke: Last Line (' + fmtDT(lastLine.dt) + ') cannot be earlier than Last Lift (' + fmtDT(ll.dt) + ').\nPlease check the times and dates.');
     return;
   }
 
   const rec = S.records.find(r=>r.id===id);
-  const srtWindowStart = toHM(addMin(parseT(rec.suggested_srt),-15));
-  const srtClass = classifySRT(rec.suggested_srt, ll);
-  const deviation = Math.round((parseT(ll)-parseT(rec.predicted_last_lift_time))/60000);
-  const quickSail = minDiff(ll, lastLine);
+  // Legacy predictions without a stored date are placed nearest to the actual last lift
+  const srtAt = recDT(rec, 'suggested_srt_at', 'suggested_srt', ll.dt);
+  const predAt = recDT(rec, 'predicted_last_lift_at', 'predicted_last_lift_time', ll.dt);
+  const srtWindowStart = toHM(addMin(srtAt, -15));
+  const srtClass = (ll.dt >= addMin(srtAt, -15) && ll.dt <= srtAt) ? 'GOOD' : 'NOT QUALITY';
+  const deviation = diffMin(predAt, ll.dt);
+  const quickSail = diffMin(ll.dt, lastLine.dt);
   const qsailClass = classifyQS(quickSail, 17);
   const totalIdle = quickStart + quickSail;
   const totalIdleClass = totalIdle <= 37 ? 'GOOD' : 'NOT QUALITY';
 
   const ok = await dbUpdate(id, {
-    actual_last_lift_time: ll, actual_pilot_onboard_time: po, actual_srt_time: srt,
-    last_line_time: lastLine, srt_window_start: srtWindowStart, srt_window_end: rec.suggested_srt,
+    actual_last_lift_time: ll.hm, actual_pilot_onboard_time: po.hm, actual_srt_time: srt.hm,
+    last_line_time: lastLine.hm,
+    actual_last_lift_at: ll.dt.toISOString(), pilot_onboard_at: po.dt.toISOString(),
+    actual_srt_at: srt.dt.toISOString(), last_line_at: lastLine.dt.toISOString(),
+    srt_window_start: srtWindowStart, srt_window_end: rec.suggested_srt,
     srt_class: srtClass, deviation_minutes: deviation,
     quick_sail_minutes: quickSail, quick_sail_class: qsailClass,
     total_idle_minutes: totalIdle, total_idle_class: totalIdleClass,
@@ -666,9 +826,9 @@ function renderRecordDetail(r) {
   <div class="ep-title">Phase 1 \u2014 Arrival</div>
   <div class="rbox" style="margin-bottom:8px">
     <div class="rrow" style="font-size:13px"><span>Vessel reference</span><span class="rval">${r.vessel_reference}</span></div>
-    <div class="rrow"><span>First line</span><span class="rval">${r.first_line_time}</span></div>
-    <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${r.rtw_time}</span></div>
-    <div class="rrow"><span>First lift</span><span class="rval">${r.first_lift_time}</span></div>
+    <div class="rrow"><span>First line</span><span class="rval">${showAt(r,'first_line_at','first_line_time')}</span></div>
+    <div class="rrow"><span>Vessel secured (RTW)</span><span class="rval">${showAt(r,'rtw_at','rtw_time')}</span></div>
+    <div class="rrow"><span>First lift</span><span class="rval">${showAt(r,'first_lift_at','first_lift_time')}</span></div>
     <div class="rrow" style="font-weight:500"><span>Quick Start</span><span class="rval">${r.quick_start_minutes} min <span class="badge ${r.quick_start_class==='GOOD'?'bg':'bb'}">${r.quick_start_class}</span></span></div>
     ${r.arrival_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.arrival_remarks}</span></div>`:''}
   </div>
@@ -677,17 +837,17 @@ function renderRecordDetail(r) {
   <div class="rbox" style="margin-bottom:8px">
     <div class="rrow"><span>QC / CMPH</span><span class="rval">${r.qc_number} \u00b7 ${r.cmph} CMPH</span></div>
     <div class="rrow"><span>Total operation time</span><span class="rval">${parseFloat(r.total_min).toFixed(1)} min</span></div>
-    <div class="rrow"><span>Predicted last lift</span><span class="rval" style="color:#185FA5">${r.predicted_last_lift_time}</span></div>
-    <div class="rrow"><span>Recommended SRT</span><span class="rval" style="color:#0F6E56">${r.suggested_srt}</span></div>
+    <div class="rrow"><span>Predicted last lift</span><span class="rval" style="color:#185FA5">${showAt(r,'predicted_last_lift_at','predicted_last_lift_time')}</span></div>
+    <div class="rrow"><span>Recommended SRT</span><span class="rval" style="color:#0F6E56">${showAt(r,'suggested_srt_at','suggested_srt')}</span></div>
     ${r.prediction_remarks?`<div class="rrow"><span>Remarks</span><span style="font-size:11px;color:#6b6b67;max-width:55%;text-align:right">${r.prediction_remarks}</span></div>`:''}
   </div>`:''}
   ${r.actual_last_lift_time?`
   <div class="ep-title" style="margin-top:8px">Phase 3 \u2014 Actual Departure</div>
   <div class="rbox">
-    <div class="rrow"><span>Actual last lift</span><span class="rval">${r.actual_last_lift_time}</span></div>
-    <div class="rrow"><span>Pilot onboard</span><span class="rval">${r.actual_pilot_onboard_time}</span></div>
-    <div class="rrow"><span>Actual SRT</span><span class="rval">${r.actual_srt_time}</span></div>
-    <div class="rrow"><span>Last line</span><span class="rval">${r.last_line_time}</span></div>
+    <div class="rrow"><span>Actual last lift</span><span class="rval">${showAt(r,'actual_last_lift_at','actual_last_lift_time')}</span></div>
+    <div class="rrow"><span>Pilot onboard</span><span class="rval">${showAt(r,'pilot_onboard_at','actual_pilot_onboard_time')}</span></div>
+    <div class="rrow"><span>Actual SRT</span><span class="rval">${showAt(r,'actual_srt_at','actual_srt_time')}</span></div>
+    <div class="rrow"><span>Last line</span><span class="rval">${showAt(r,'last_line_at','last_line_time')}</span></div>
     <div class="rrow"><span>SRT compliance window</span><span class="rval">${r.srt_window_start} \u2013 ${r.srt_window_end}</span></div>
     <div class="rrow"><span>SRT result</span><span class="rval"><span class="badge ${r.srt_class==='GOOD'?'bg':'bb'}">${r.srt_class}</span></span></div>
     <div class="rrow" style="font-weight:500"><span>Quick Sail (Last Line \u2212 Last Lift)</span><span class="rval">${r.quick_sail_minutes} min <span class="badge ${r.quick_sail_class==='GOOD'?'bg':'bb'}">${r.quick_sail_class}</span></span></div>
@@ -903,6 +1063,9 @@ window.downloadReport = function() {
     { key:'first_line_time',          label:'First Line Time' },
     { key:'rtw_time',                 label:'RTW Time' },
     { key:'first_lift_time',          label:'First Lift Time' },
+    { key:'first_line_at',            label:'First Line Date-Time', fmt: csvDT },
+    { key:'rtw_at',                   label:'RTW Date-Time',        fmt: csvDT },
+    { key:'first_lift_at',            label:'First Lift Date-Time', fmt: csvDT },
     { key:'quick_start_minutes',      label:'Quick Start (min)' },
     { key:'quick_start_class',        label:'Quick Start Class' },
     { key:'arrival_remarks',          label:'Arrival Remarks' },
@@ -925,6 +1088,8 @@ window.downloadReport = function() {
     { key:'total_min',                label:'Total Operation Time (min)' },
     { key:'predicted_last_lift_time', label:'Predicted Last Lift' },
     { key:'suggested_srt',            label:'Suggested SRT' },
+    { key:'predicted_last_lift_at',   label:'Predicted Last Lift Date-Time', fmt: csvDT },
+    { key:'suggested_srt_at',         label:'Suggested SRT Date-Time',       fmt: csvDT },
     { key:'prediction_remarks',       label:'Prediction Remarks' },
     { key:'prediction_operator',      label:'Prediction Operator' },
     // Phase 3 Actual
@@ -932,6 +1097,10 @@ window.downloadReport = function() {
     { key:'actual_pilot_onboard_time',label:'Pilot Onboard' },
     { key:'actual_srt_time',          label:'Actual SRT' },
     { key:'last_line_time',           label:'Last Line Time' },
+    { key:'actual_last_lift_at',      label:'Actual Last Lift Date-Time', fmt: csvDT },
+    { key:'pilot_onboard_at',         label:'Pilot Onboard Date-Time',    fmt: csvDT },
+    { key:'actual_srt_at',            label:'Actual SRT Date-Time',       fmt: csvDT },
+    { key:'last_line_at',             label:'Last Line Date-Time',        fmt: csvDT },
     { key:'srt_window_start',         label:'SRT Window Start' },
     { key:'srt_window_end',           label:'SRT Window End' },
     { key:'srt_class',                label:'SRT Class' },
@@ -943,6 +1112,8 @@ window.downloadReport = function() {
     { key:'departure_remarks',        label:'Departure Remarks' },
     { key:'departure_operator',       label:'Departure Operator' },
   ];
+
+  function csvDT(v) { if (!v) return ''; const d = new Date(v); return ymd(d) + ' ' + toHM(d); }
 
   const escape = v => {
     if (v === null || v === undefined) return '';

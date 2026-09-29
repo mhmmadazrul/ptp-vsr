@@ -379,3 +379,65 @@ tr:last-child td { border-bottom: none; }
 
 /* ── SAFE AREA FOR NOTCH PHONES ── */
 .app { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+
+/* ── DATE CHIP (subtle, auto-filled date on each time field) ── */
+.lrow { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 26px; }
+.dchip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; margin: 0 -4px 0 0;
+  min-height: 26px;
+  border: none; border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit; font-size: 11px; font-weight: 500;
+  cursor: pointer; touch-action: manipulation; white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+.dchip i { font-size: 12px; opacity: .7; }
+.dchip:hover, .dchip:focus-visible { background: var(--bg); color: var(--text); outline: none; }
+.dchip.shifted { background: #FDF0E4; color: #A0521A; }
+.dchip.shifted i { opacity: 1; }
+.dchip-d {
+  margin-left: 2px; padding: 0 5px; border-radius: 999px;
+  background: #F58220; color: #fff; font-size: 10px; font-weight: 600; line-height: 16px;
+}
+.dchip.flash { animation: dchipFlash 1.2s ease-out; }
+@keyframes dchipFlash {
+  0%   { box-shadow: 0 0 0 0 rgba(245,130,32,.55); transform: scale(1.06); }
+  40%  { box-shadow: 0 0 0 6px rgba(245,130,32,0);  transform: scale(1); }
+  100% { box-shadow: 0 0 0 0 rgba(245,130,32,0); }
+}
+
+/* Date popover */
+.dpop {
+  position: absolute; z-index: 1000; min-width: 200px;
+  background: var(--surface);
+  border: 0.5px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,.12);
+  padding: 4px;
+  animation: dpopIn .12s ease-out;
+}
+@keyframes dpopIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.dpop button, .dpop .dpop-pick {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; min-height: 40px; padding: 8px 10px;
+  border: none; border-radius: var(--radius-sm); background: transparent;
+  color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.dpop button span { color: var(--muted); font-size: 12px; }
+.dpop button:hover, .dpop .dpop-pick:hover { background: var(--bg); }
+.dpop button.on { background: #E8F0F8; color: var(--blue); font-weight: 600; }
+.dpop button.on span { color: var(--blue); }
+.dpop .dpop-pick { position: relative; justify-content: flex-start; color: var(--blue); border-top: 0.5px solid var(--border); border-radius: 0 0 var(--radius-sm) var(--radius-sm); margin-top: 2px; }
+.dpop .dpop-pick i, .dpop .dpop-auto i { font-size: 15px; }
+.dpop .dpop-pick input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; border: none; }
+.dpop .dpop-auto { justify-content: flex-start; color: var(--muted); font-size: 12px; }
+
+/* Early-lift note & day tag */
+.early-note {
+  display: flex; gap: 6px; align-items: flex-start;
+  margin-top: 8px; padding: 8px 10px; border-radius: var(--radius-sm);
+  background: #FDF0E4; color: #7A3E10; font-size: 12px; line-height: 1.4;
+}
+.early-note i { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
+.daytag { font-size: 11px; color: #A0521A; font-weight: 500; margin-top: 2px; }
