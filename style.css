@@ -534,3 +534,32 @@ input::placeholder, textarea::placeholder { text-transform: none; }
 @media (max-width: 640px) { .ep .grid.g2 { grid-template-columns: 1fr 1fr; } }
 .dlg-sum .table-wrap, .audit-entry .table-wrap { margin: 4px 0 0; }
 .ep .k-numerictextbox, .ep .k-dropdownlist { width: 100%; }
+
+/* ── Date chips on time fields (auto-filled date, tap to change) ── */
+.fld-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 24px; }
+.dchip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; margin-right: -4px; min-height: 24px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background .15s, color .15s; }
+.dchip .ti { font-size: 13px; opacity: .8; }
+.dchip:hover, .dchip:focus-visible { background: var(--surface-2); color: var(--text); outline: none; }
+.dchip.shifted { background: #FDF0E4; color: #A0521A; }
+.dchip-d { margin-left: 2px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 10.5px; line-height: 16px; }
+.dchip-pin { font-size: 11px !important; }
+.dchip.flash { animation: dchipFlash 1.2s ease-out; }
+@keyframes dchipFlash { 0% { box-shadow: 0 0 0 0 rgba(232,131,12,.55); transform: scale(1.06); } 40% { box-shadow: 0 0 0 6px rgba(232,131,12,0); transform: scale(1); } 100% { box-shadow: none; } }
+.dpop { position: absolute; z-index: 30000; min-width: 210px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); padding: 4px; animation: dpopIn .12s ease-out; }
+@keyframes dpopIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.dpop button, .dpop .dpop-pick { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 40px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.dpop button span { color: var(--muted); font-size: 12px; }
+.dpop button:hover, .dpop .dpop-pick:hover { background: var(--surface-2); }
+.dpop button.on { background: color-mix(in srgb, var(--brand) 10%, var(--surface)); color: var(--brand); font-weight: 700; }
+.dpop button.on span { color: var(--brand); }
+.dpop .dpop-pick { position: relative; justify-content: flex-start; color: var(--brand); border-top: 1px solid var(--border); border-radius: 0 0 8px 8px; margin-top: 2px; }
+.dpop .dpop-pick input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; border: 0; }
+.dpop .dpop-auto { justify-content: flex-start; color: var(--muted); font-size: 12px; }
+
+/* ── Negative Quick Start ── */
+.res-neg { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 4px; padding: 10px 12px; border-radius: 10px; background: var(--warn-bg); color: #7A4A0B; font-size: 12.5px; line-height: 1.45; }
+.res-neg .ti { font-size: 17px; flex-shrink: 0; margin-top: 1px; }
+.tl-date { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.tl-t small { font-family: inherit; font-weight: 600; color: #A0521A; font-size: 10.5px; margin-left: 4px; }
+.dlg-call em { font-style: normal; font-size: 12px; opacity: .8; margin-left: 6px; }

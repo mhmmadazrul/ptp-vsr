@@ -41,9 +41,15 @@ so the app stays on Apache-2.0 components only.
 | SRT compliance | SRT − 15 ≤ Actual Last Lift ≤ SRT | within window |
 
 Recommended SRT = predicted last lift rounded up to the next 15-minute mark.
-Poka-yoke: First Line ≤ RTW ≤ First Lift, and Last Line ≥ Actual Last Lift.
-Times are 24-hour HH:mm; a sequence that crosses midnight (e.g. 23:50 → 00:05) is treated as
-+15 min, not as an error. A later time that is earlier by less than 12 hours is flagged.
+Poka-yoke: First Line ≤ RTW, and Last Line ≥ Actual Last Lift.
+**Negative Quick Start** is allowed: a First Lift before RTW is saved as a negative value (e.g. −10 min, counted GOOD
+since it is ≤ 20), flagged on screen and in the confirmation, with remarks expected to explain it.
+
+**Date-aware times.** Every time field carries a date chip. Dates fill in automatically — the first field is today
+(or yesterday if the time is more than an hour ahead), later fields take the date nearest the previous field, so
+23:50 → 00:05 rolls to the next day. Tap a chip to choose Yesterday / Today / Tomorrow / any date. All calculations
+use the full date-time, and both the HH:mm columns and the `*_at` timestamp columns are saved.
+Older records without `*_at` values are placed on the date nearest their neighbouring times.
 
 ## Workflow
 Each phase ends with **Calculate …** → a confirmation popup of all details → **Amend** (close and fix) or
@@ -56,6 +62,8 @@ and a before/after table is shown before saving. Edited records show an **Edited
 
 ## Database
 - `vsr_records`, `qc_database` — as before.
+- `migration_add_datetimes.sql` (run once) — the `*_at` date-time columns. If they are missing the app still saves
+  (it drops only the missing column and logs a warning), but dates won't be stored.
 - `migration_prediction_audit.sql` (run once in Supabase → SQL Editor) — adds edit-tracking columns, the read-only
   `vsr_audit_log` table, and a trigger that refuses an edit without a reason + editor ID and logs old → new values
   in the same transaction. **Edit prediction will not save until this has been run.**

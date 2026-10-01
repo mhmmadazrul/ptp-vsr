@@ -49,7 +49,7 @@ const S = {
   records: [],
   loaded: false,
   loading: false,
-  arrDraft: { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '' },
+  arrDraft: { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '', dates: null },
   predSel: null,
   predDraft: { qc: '', cmph: null, f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 0, f8: 0, remarks: '' },
   depSel: null,
@@ -94,6 +94,105 @@ function classifySRT(srt, actualLL) {
   return (d >= 0 && d <= TARGET.srtWindow) ? 'GOOD' : 'NOT QUALITY';
 }
 const phaseOf = r => !r.predicted_last_lift_time ? 'arrival' : !r.actual_last_lift_time ? 'prediction' : 'completed';
+
+// ── DATE-AWARE TIMES ───────────────────────────────────────
+// Every time field carries a calendar date, saved to the *_at (timestamptz) columns.
+//  • First field of a group: today (or yesterday if the time would be > 60 min in the future).
+//  • Later fields: the date that puts the time nearest the previous field (±12 h), so
+//    23:55 → 00:05 rolls to the next day, while RTW 10:10 → First Lift 10:04 stays the same day.
+//  • A date the operator picks by hand is never auto-changed again ("Back to auto" undoes it).
+const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+const shiftYmd = (s, n) => { const d = new Date(s + 'T12:00'); d.setDate(d.getDate() + n); return ymd(d); };
+const mkDT = (ds, hm) => new Date(ds + 'T' + hm);
+const diffMin = (a, b) => Math.round((b - a) / 60000);             // b − a in minutes (Dates)
+const fmtDay = s => { const d = new Date(s + 'T12:00'); return WD[d.getDay()] + ' ' + d.getDate() + ' ' + MO[d.getMonth()]; };
+/** "HH:mm" plus " · 1 Oct" when the date isn't today */
+const fmtAt = d => toHM(d) + (ymd(d) === ymd(new Date()) ? '' : ' · ' + d.getDate() + ' ' + MO[d.getMonth()]);
+/** Always "HH:mm · 1 Oct" */
+const fmtDT = d => toHM(d) + ' · ' + d.getDate() + ' ' + MO[d.getMonth()];
+
+function nearestDate(hm, anchor) {
+  const base = ymd(anchor);
+  let best = base, gap = Infinity;
+  [-1, 0, 1].forEach(k => { const d = shiftYmd(base, k); const g = Math.abs(mkDT(d, hm) - anchor); if (g < gap) { gap = g; best = d; } });
+  return best;
+}
+/** Date-time of a stored record field; legacy rows (no *_at) are placed nearest an anchor */
+function recAt(r, atKey, hmKey, anchor) {
+  if (r[atKey]) return new Date(r[atKey]);
+  if (!r[hmKey]) return null;
+  const a = anchor || new Date(r.created_at);
+  return mkDT(nearestDate(r[hmKey], a), r[hmKey]);
+}
+/** Display a stored time with its date (falls back to HH:mm for legacy rows) */
+const showAt = (r, atKey, hmKey) => r[atKey] ? fmtAt(new Date(r[atKey])) : (r[hmKey] || '');
+
+const DT_GROUPS = { arr: ['a-fl', 'a-rtw', 'a-fli'], dep: ['d-ll', 'd-po', 'd-srt', 'd-line'] };
+let DT = {};        // { fieldId: { date:'YYYY-MM-DD', manual:bool } }
+let DTW = {};       // { fieldId: kendoTimePicker }
+const groupOf = id => Object.keys(DT_GROUPS).find(g => DT_GROUPS[g].includes(id));
+
+function initDTGroup(g, saved) {
+  DT_GROUPS[g].forEach(id => { DT[id] = saved && saved[id] ? Object.assign({}, saved[id]) : { date: ymd(new Date()), manual: false }; });
+}
+function dtSync(g) {
+  let anchor = null;
+  DT_GROUPS[g].forEach(id => {
+    const st = DT[id] || (DT[id] = { date: ymd(new Date()), manual: false });
+    const hm = DTW[id] ? readTime(DTW[id]).hm : null;
+    if (!st.manual) {
+      const prev = st.date;
+      if (hm && anchor) st.date = nearestDate(hm, anchor);
+      else if (hm) { const t = ymd(new Date()); st.date = (mkDT(t, hm) - new Date() > 60 * 60000) ? shiftYmd(t, -1) : t; }
+      else st.date = anchor ? ymd(anchor) : ymd(new Date());
+      if (prev !== st.date) st.flash = true;
+    }
+    if (hm) anchor = mkDT(st.date, hm);
+  });
+  DT_GROUPS[g].forEach(paintChip);
+  if (g === 'arr') S.arrDraft.dates = JSON.parse(JSON.stringify(DT_GROUPS.arr.reduce((o, id) => (o[id] = { date: DT[id].date, manual: DT[id].manual }, o), {})));
+}
+function paintChip(id) {
+  const el = document.getElementById(id + '-dc'); const st = DT[id];
+  if (!el || !st) return;
+  const first = DT_GROUPS[groupOf(id)][0];
+  const delta = Math.round((new Date(st.date + 'T12:00') - new Date(DT[first].date + 'T12:00')) / 86400000);
+  const shifted = delta !== 0 && id !== first;
+  el.innerHTML = `<i class="ti ti-calendar"></i>${fmtDay(st.date)}${shifted ? `<span class="dchip-d">${delta > 0 ? '+' : ''}${delta}d</span>` : ''}${st.manual ? '<i class="ti ti-pin dchip-pin"></i>' : ''}`;
+  el.classList.toggle('shifted', shifted);
+  el.title = st.manual ? 'Date set manually — tap to change' : 'Date filled automatically — tap to change';
+  if (st.flash) { el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); st.flash = false; }
+}
+function readDT(id) {
+  const hm = DTW[id] ? readTime(DTW[id]).hm : null;
+  if (!hm) return null;
+  const date = (DT[id] && DT[id].date) || ymd(new Date());
+  return { hm, date, dt: mkDT(date, hm) };
+}
+// Date chip popover: Yesterday / Today / Tomorrow / Pick date…
+function openDatePop(id, chip) {
+  closeDatePop();
+  const today = ymd(new Date());
+  const opts = [['Yesterday', shiftYmd(today, -1)], ['Today', today], ['Tomorrow', shiftYmd(today, 1)]];
+  const pop = $(`<div class="dpop" id="dpop" role="menu">
+    ${opts.map(([l, d]) => `<button type="button" data-d="${d}" class="${DT[id].date === d ? 'on' : ''}">${l}<span>${fmtDay(d)}</span></button>`).join('')}
+    <label class="dpop-pick"><i class="ti ti-calendar-search"></i>Pick date…<input type="date" value="${DT[id].date}"></label>
+    ${DT[id].manual ? '<button type="button" class="dpop-auto" data-auto="1"><i class="ti ti-wand"></i>Back to auto</button>' : ''}
+  </div>`).appendTo(document.body);
+  const set = d => { DT[id].date = d; DT[id].manual = true; closeDatePop(); dtSync(groupOf(id)); onDTChange(groupOf(id)); };
+  pop.on('click', '[data-d]', function () { set(this.getAttribute('data-d')); });
+  pop.on('click', '[data-auto]', () => { DT[id].manual = false; closeDatePop(); dtSync(groupOf(id)); onDTChange(groupOf(id)); });
+  pop.find('input').on('click', function () { try { this.showPicker(); } catch (e) {} }).on('change', function () { if (this.value) set(this.value); });
+  const r = chip.getBoundingClientRect(), w = pop.outerWidth();
+  pop.css({ top: window.scrollY + r.bottom + 4, left: Math.max(8, Math.min(window.scrollX + r.right - w, window.scrollX + document.documentElement.clientWidth - w - 8)) });
+}
+function closeDatePop() { $('#dpop').remove(); }
+$(document).on('click.dpop', e => { if (!$(e.target).closest('#dpop, .dchip').length) closeDatePop(); });
+$(window).on('resize.dpop', closeDatePop);
+/** Re-evaluate the current form after a date change */
+function onDTChange(g) { if (g === 'arr') evalArrival(); else if (g === 'dep' && W.depRec) evalDeparture(W.depRec); }
 
 function relTime(iso) {
   const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
@@ -216,7 +315,8 @@ function setBusy(btn, busy, label) {
 
 function timeField(id, label, hint) {
   return `<div class="fld">
-    <label class="k-label fld-label" for="${id}">${label}</label>
+    <div class="fld-top"><label class="k-label fld-label" for="${id}">${label}</label>
+      <button type="button" class="dchip" id="${id}-dc" data-dchip="${id}"></button></div>
     <div class="time-row">
       <input id="${id}" />
       <button type="button" class="now-btn" data-now="${id}" title="Set to current time" aria-label="Set ${label} to current time"><i class="ti ti-clock-bolt"></i>Now</button>
@@ -238,6 +338,7 @@ function initTimePicker(id, value, onChange) {
     change: onChange
   }).data('kendoTimePicker');
   $(el).on('keyup', e => { if (e.key === 'Enter') { w.value(w.element.val()); onChange(); } });
+  DTW[id] = w;
   return w;
 }
 function readTime(w) {
@@ -249,11 +350,13 @@ function readTime(w) {
 }
 function bindNowButtons(map) {
   $v().off('click.now').on('click.now', '[data-now]', function () {
-    const w = map[this.getAttribute('data-now')];
+    const id = this.getAttribute('data-now'), w = map[id];
     if (!w) return;
     w.value(new Date());
+    if (DT[id]) { DT[id].date = ymd(new Date()); DT[id].manual = false; }
     w.trigger('change');
   });
+  $v().off('click.dchip').on('click.dchip', '[data-dchip]', function (e) { e.stopPropagation(); openDatePop(this.getAttribute('data-dchip'), this); });
 }
 function setMsg(id, text, kind) {
   const el = document.getElementById(id + '-msg');
@@ -321,19 +424,33 @@ async function loadRecords(silent) {
   updateNavCounts();
 }
 
+// If an optional column (e.g. the *_at date-times) hasn't been added in Supabase yet, drop just that
+// column and retry, so saving never breaks. Run migration_add_datetimes.sql to enable them.
+const missingCol = e => { const m = e && /'([a-z0-9_]+)' column/i.exec(e.message || ''); return e && e.code === 'PGRST204' && m ? m[1] : null; };
+const OPTIONAL_COLS = /(_at|^prediction_base_at)$/;
+async function dbWrite(run, payload) {
+  let body = Object.assign({}, payload);
+  for (let i = 0; i < 12; i++) {
+    const { error } = await run(body);
+    if (!error) return null;
+    const col = missingCol(error);
+    if (col && col !== 'created_at' && OPTIONAL_COLS.test(col) && col in body) {
+      console.warn(`Column ${col} not in database — saved without it. Run migration_add_datetimes.sql.`);
+      delete body[col]; continue;
+    }
+    return error;
+  }
+  return { message: 'Too many missing columns' };
+}
 async function dbInsert(rec) {
-  try {
-    const { error } = await window.sb.from('vsr_records').insert([rec]);
-    if (error) throw error;
-    return true;
-  } catch (e) { toast('Save failed: ' + (e.message || e), 'error'); return false; }
+  const err = await dbWrite(b => window.sb.from('vsr_records').insert([b]), rec);
+  if (err) { toast('Save failed: ' + (err.message || err), 'error'); return false; }
+  return true;
 }
 async function dbUpdate(id, updates) {
-  try {
-    const { error } = await window.sb.from('vsr_records').update(updates).eq('id', id);
-    if (error) throw error;
-    return true;
-  } catch (e) { toast('Update failed: ' + (e.message || e), 'error'); return false; }
+  const err = await dbWrite(b => window.sb.from('vsr_records').update(b).eq('id', id), updates);
+  if (err) { toast('Update failed: ' + (err.message || err), 'error'); return false; }
+  return true;
 }
 
 // ── SHELL ──────────────────────────────────────────────────
@@ -412,6 +529,8 @@ function go(view, opts) {
 
 function teardownView() {
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+  closeDatePop();
+  DTW = {};
   charts.forEach(c => { try { c.destroy(); } catch (e) {} });
   charts = [];
   const el = document.getElementById('view');
@@ -514,7 +633,7 @@ function renderArrival(v) {
           ${timeField('a-rtw', 'Vessel secured (RTW)')}
           ${timeField('a-fli', 'First lift')}
         </div>
-        <div class="rule"><i class="ti ti-shield-check"></i>Poka-yoke: First Line ≤ RTW ≤ First Lift. Times that cross midnight are handled automatically.</div>
+        <div class="rule"><i class="ti ti-shield-check"></i><span>Poka-yoke: First Line ≤ RTW. First Lift <b>before</b> RTW is allowed — it is saved as a <b>negative Quick Start</b> (please explain in remarks). Dates fill in automatically, including past midnight; tap a date to change it.</span></div>
       </section>
 
       <section class="card">
@@ -541,13 +660,14 @@ function renderArrival(v) {
   W.rtw = initTimePicker('a-rtw', d.rtw, onT);
   W.fli = initTimePicker('a-fli', d.fli, onT);
   bindNowButtons({ 'a-fl': W.fl, 'a-rtw': W.rtw, 'a-fli': W.fli });
+  initDTGroup('arr', d.dates);
 
   W.rem = $('#a-rem').kendoTextArea({ rows: 3, maxLength: 500, placeholder: 'Anything that affected the arrival — berth readiness, lashing gang, crane availability…', size: 'large', value: d.remarks, resize: 'vertical' }).data('kendoTextArea');
   $('#a-rem').on('input', function () { S.arrDraft.remarks = this.value; setMsg('a-rem', ''); });
 
   W.save = kButton('#a-save', { themeColor: 'primary' });
   W.save.bind('click', confirmArrival);
-  $('#a-clear').on('click', () => { S.arrDraft = { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '' }; renderView(); });
+  $('#a-clear').on('click', () => { S.arrDraft = { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '', dates: null }; renderView(); });
 
   evalArrival();
 }
@@ -555,24 +675,25 @@ function renderArrival(v) {
 function evalArrival() {
   const fl = readTime(W.fl), rtw = readTime(W.rtw), fli = readTime(W.fli);
   Object.assign(S.arrDraft, { fl: fl.hm, rtw: rtw.hm, fli: fli.hm });
+  dtSync('arr');
   let ok = true;
   [['a-fl', fl], ['a-rtw', rtw], ['a-fli', fli]].forEach(([id, t]) => {
     if (t.bad) { setMsg(id, 'Enter time as HH:mm (e.g. 08:30)', 'error'); ok = false; }
     else setMsg(id, '');
   });
+  const A = readDT('a-fl'), B = readDT('a-rtw'), C = readDT('a-fli');
   let seqErr = null;
-  if (fl.hm && rtw.hm && circDiff(fl.hm, rtw.hm) < 0) {
-    seqErr = `RTW (${rtw.hm}) is earlier than First Line (${fl.hm}).`;
+  // Poka-yoke: RTW can't be before First Line (date-aware)
+  if (A && B && B.dt < A.dt) {
+    seqErr = `RTW (${fmtDT(B.dt)}) is earlier than First Line (${fmtDT(A.dt)}).`;
     setMsg('a-rtw', '<i class="ti ti-alert-triangle"></i> Earlier than First Line', 'error'); ok = false;
   }
-  if (rtw.hm && fli.hm && circDiff(rtw.hm, fli.hm) < 0) {
-    seqErr = `First Lift (${fli.hm}) is earlier than RTW (${rtw.hm}).`;
-    setMsg('a-fli', '<i class="ti ti-alert-triangle"></i> Earlier than RTW', 'error'); ok = false;
-  }
-  if (ok && fl.hm && rtw.hm) setMsg('a-rtw', `+${circDiff(fl.hm, rtw.hm)} min after First Line`, 'ok');
+  if (ok && A && B) setMsg('a-rtw', `+${diffMin(A.dt, B.dt)} min after First Line`, 'ok');
+  // First Lift before RTW is allowed → negative Quick Start (flagged, not blocked)
+  if (ok && B && C && C.dt < B.dt) setMsg('a-fli', `<i class="ti ti-info-circle"></i> ${diffMin(C.dt, B.dt)} min before RTW — negative Quick Start`, 'warn');
 
   const box = $('#arr-result');
-  if (!(fl.hm && rtw.hm && fli.hm)) {
+  if (!(A && B && C)) {
     box.html(resultPlaceholder('Quick Start', 'Enter all three arrival times to see Quick Start.', TARGET.qs));
     return null;
   }
@@ -581,20 +702,23 @@ function evalArrival() {
       <div class="res-error"><i class="ti ti-alert-octagon"></i><div><b>Sequence error</b><br>${esc(seqErr || 'Check the times entered.')}</div></div>`);
     return null;
   }
-  const qs = circDiff(rtw.hm, fli.hm);
+  const qs = diffMin(B.dt, C.dt);
   const cls = classify(qs, TARGET.qs);
+  const tl = d => d.date === A.date ? d.hm : `${d.hm} <small>${fmtDay(d.date)}</small>`;
   box.html(`
     <div class="res-head">Quick Start <span class="res-sub">First Lift − RTW</span></div>
     ${bigMetric(qs, 'min', cls, TARGET.qs)}
     ${gauge(qs, TARGET.qs)}
+    ${qs < 0 ? `<div class="res-neg"><i class="ti ti-arrow-back-up"></i><div><b>Negative Quick Start</b> — first lift ${-qs} min before the vessel was secured. It will be saved as ${qs} min; explain why in remarks.</div></div>` : ''}
     <div class="timeline">
-      ${tlStep('First line', fl.hm)}
-      ${tlGap(circDiff(fl.hm, rtw.hm))}
-      ${tlStep('RTW', rtw.hm)}
+      ${A.date !== ymd(new Date()) || C.date !== A.date ? `<div class="tl-date">${fmtDay(A.date)}</div>` : ''}
+      ${tlStep('First line', tl(A))}
+      ${tlGap(diffMin(A.dt, B.dt))}
+      ${tlStep('RTW', tl(B))}
       ${tlGap(qs, cls)}
-      ${tlStep('First lift', fli.hm)}
+      ${tlStep('First lift', tl(C))}
     </div>`);
-  return { fl: fl.hm, rtw: rtw.hm, fli: fli.hm, qs, cls };
+  return { fl: A.hm, rtw: B.hm, fli: C.hm, flAt: A.dt, rtwAt: B.dt, fliAt: C.dt, qs, cls };
 }
 
 function resultPlaceholder(title, text, target) {
@@ -607,11 +731,11 @@ function bigMetric(val, unit, cls, target) {
       <span class="big-n">${val}</span><span class="big-u">${unit}</span>
       ${badge(cls)}
     </div>
-    <div class="res-target">Target ≤ ${target} ${unit} · ${cls === 'GOOD' ? `${target - val} ${unit} under target` : `${val - target} ${unit} over target`}</div>`;
+    <div class="res-target">Target ≤ ${target} ${unit} · ${val < 0 ? `negative (${-val} ${unit} early)` : cls === 'GOOD' ? `${target - val} ${unit} under target` : `${val - target} ${unit} over target`}</div>`;
 }
 function gauge(val, target) {
   const max = Math.max(target * 2, val);
-  const pct = Math.min(100, val / max * 100);
+  const pct = Math.max(0, Math.min(100, val / max * 100));   // negative values sit at the start
   const tpct = target / max * 100;
   return `<div class="gauge" role="img" aria-label="${val} of ${target} target">
     <div class="gauge-fill ${val <= target ? 'good' : 'bad'}" style="width:${pct}%"></div>
@@ -646,10 +770,11 @@ function confirmArrival() {
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(vessel)} <span>· ${esc(ref)}</span></div>
       ${dup ? `<div class="cf-warn"><i class="ti ti-alert-triangle"></i><div><b>Possible duplicate</b> — this vessel already has an open record (${esc(PHASES[phaseOf(dup)].label.toLowerCase())}, created ${esc(relTime(dup.created_at))}).</div></div>` : ''}
       ${cfSec('Arrival times')}
-      ${cfKV('First line', esc(r.fl))}
-      ${cfKV('Vessel secured (RTW)', esc(r.rtw))}
-      ${cfKV('First lift', esc(r.fli))}
+      ${cfKV('First line', esc(fmtDT(r.flAt)))}
+      ${cfKV('Vessel secured (RTW)', esc(fmtDT(r.rtwAt)))}
+      ${cfKV('First lift', esc(fmtDT(r.fliAt)))}
       ${cfKV('Quick Start', r.qs + ' min', badge(r.cls), true)}
+      ${r.qs < 0 ? `<div class="cf-warn"><i class="ti ti-arrow-back-up"></i><div><b>Negative Quick Start (${r.qs} min)</b> — First Lift is ${-r.qs} min before RTW. Make sure the remarks explain why.</div></div>` : ''}
       ${cfSec('Remarks')}
       ${cfRem(rem)}
     </div>`,
@@ -668,6 +793,9 @@ async function saveArrival({ vessel, ref, rem, r }) {
     first_line_time: r.fl,
     rtw_time: r.rtw,
     first_lift_time: r.fli,
+    first_line_at: r.flAt.toISOString(),
+    rtw_at: r.rtwAt.toISOString(),
+    first_lift_at: r.fliAt.toISOString(),
     quick_start_minutes: r.qs,
     quick_start_class: r.cls,
     arrival_remarks: rem,
@@ -681,7 +809,7 @@ async function saveArrival({ vessel, ref, rem, r }) {
 
   S.records.unshift(rec);
   updateNavCounts();
-  S.arrDraft = { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '' };
+  S.arrDraft = { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '', dates: null };
   toast(`Arrival saved · ${rec.vessel_name}`, 'success');
   openDialog({
     title: 'Arrival saved',
@@ -902,7 +1030,7 @@ function evalPrediction() {
       <div class="kv-total"><span>Total operation time</span><b>${res.totalMin.toFixed(1)} min · ${Math.floor(res.totalMin / 60)}h ${pad(Math.round(res.totalMin % 60))}m</b></div>
     </div>
     <div class="rule sm"><i class="ti ti-info-circle"></i>SRT = predicted last lift rounded up to the next 15-min mark. GOOD if actual last lift lands in ${toHM(addMin(srt, -15))}–${toHM(srt)}.</div>`);
-  return { res, ll, srt, qc, speed };
+  return { res, ll, srt, qc, speed, now };
 }
 
 /** Validate, then show the confirmation popup (Amend / Calculate & save) */
@@ -933,7 +1061,7 @@ function confirmPrediction() {
       ${cfKV('Total operation time', p.res.totalMin.toFixed(1) + ' min', '', true)}
       ${cfSec('Remarks')}
       ${cfRem(rem)}
-      <div class="cf-note"><i class="ti ti-clock"></i><div>Predicted last lift = the moment you tap <b>Calculate &amp; save</b> + total operation time (≈ <b>${toHM(p.ll)}</b>, SRT <b>${toHM(p.srt)}</b> if saved now).</div></div>
+      <div class="cf-note"><i class="ti ti-clock"></i><div>Predicted last lift = the moment you tap <b>Calculate &amp; save</b> + total operation time (≈ <b>${fmtAt(p.ll)}</b>, SRT <b>${fmtAt(p.srt)}</b> if saved now).</div></div>
     </div>`,
     actions: [
       { text: 'Amend' },
@@ -953,6 +1081,7 @@ async function savePrediction() {
     f1: +d.f1, f2: +d.f2, f3: +d.f3, f4: +d.f4, f5: +d.f5, f6: +d.f6, f7: +d.f7, f8: +d.f8,
     container_min: p.res.containerMin, gantry_min: p.res.gantryMin, buffer_min: p.res.bufferMin, total_min: p.res.totalMin,
     predicted_last_lift_time: toHM(p.ll), suggested_srt: toHM(p.srt),
+    predicted_last_lift_at: p.ll.toISOString(), suggested_srt_at: p.srt.toISOString(), prediction_base_at: p.now.toISOString(),
     prediction_remarks: rem, prediction_operator: S.operator
   };
   setBusy(W.save, true);
@@ -970,8 +1099,8 @@ async function savePrediction() {
     title: 'Prediction saved',
     html: `<div class="dlg-sum">
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(rec.vessel_name)} <span>· ${esc(rec.vessel_reference)}</span></div>
-      <div class="dlg-call"><span>Call pilot for SRT</span><b>${esc(upd.suggested_srt)}</b></div>
-      <div class="dlg-kv"><span>Predicted last lift</span><b>${esc(upd.predicted_last_lift_time)}</b></div>
+      <div class="dlg-call"><span>Call pilot for SRT${ymd(p.srt) !== ymd(new Date()) ? ` <em>${fmtDay(ymd(p.srt))}</em>` : ''}</span><b>${esc(upd.suggested_srt)}</b></div>
+      <div class="dlg-kv"><span>Predicted last lift</span><b>${esc(fmtAt(p.ll))}</b></div>
       <div class="dlg-kv"><span>SRT GOOD window</span><b>${toHM(addMin(p.srt, -15))} – ${esc(upd.suggested_srt)}</b></div>
     </div>`,
     width: 420,
@@ -1003,18 +1132,19 @@ function renderDeparture(v) {
       ${queueHTML(ready, null, 'dep')}
     </section>`);
     const pick = id => { S.depSel = id; renderView(); };
-    W.pick = vesselPicker('#d-pick', ready, r => `SRT ${r.suggested_srt} · QC ${r.qc_number || '—'} · pred. LL ${r.predicted_last_lift_time}`, pick);
+    W.pick = vesselPicker('#d-pick', ready, r => `SRT ${showAt(r, 'suggested_srt_at', 'suggested_srt')} · QC ${r.qc_number || '—'} · pred. LL ${showAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time')}`, pick);
     v.on('click', '.q-item', function () { pick(this.getAttribute('data-id')); });
     return;
   }
 
   const r = S.records.find(x => x.id === S.depSel);
-  const winStart = toHM(addMin(hmToDate(r.suggested_srt), -TARGET.srtWindow));
+  const srtAt0 = recAt(r, 'suggested_srt_at', 'suggested_srt');
+  const winStart = toHM(addMin(srtAt0, -TARGET.srtWindow));
   v.html(`
   ${stepper('departure')}
   ${selectedStrip(r, `
-    <div><span>Pred. last lift</span><b class="t-blue">${esc(r.predicted_last_lift_time)}</b></div>
-    <div><span>Rec. SRT</span><b class="t-green">${esc(r.suggested_srt)}</b></div>
+    <div><span>Pred. last lift</span><b class="t-blue">${esc(showAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time'))}</b></div>
+    <div><span>Rec. SRT</span><b class="t-green">${esc(showAt(r, 'suggested_srt_at', 'suggested_srt'))}</b></div>
     <div><span>GOOD window</span><b>${winStart}–${esc(r.suggested_srt)}</b></div>`)}
   <div class="layout">
     <div class="col-main">
@@ -1026,7 +1156,7 @@ function renderDeparture(v) {
           ${timeField('d-srt', 'Actual SRT')}
           ${timeField('d-line', 'Last line')}
         </div>
-        <div class="rule"><i class="ti ti-shield-check"></i>Poka-yoke: Last Line cannot be earlier than Actual Last Lift.</div>
+        <div class="rule"><i class="ti ti-shield-check"></i>Poka-yoke: Last Line cannot be earlier than Actual Last Lift. Dates fill in automatically, including past midnight; tap a date to change it.</div>
       </section>
       <section class="card">
         <h2 class="card-t"><i class="ti ti-message-2"></i>Remarks <span class="req">*</span></h2>
@@ -1047,6 +1177,8 @@ function renderDeparture(v) {
   W.srt = initTimePicker('d-srt', null, onT);
   W.line = initTimePicker('d-line', null, onT);
   bindNowButtons({ 'd-ll': W.ll, 'd-po': W.po, 'd-srt': W.srt, 'd-line': W.line });
+  initDTGroup('dep');
+  W.depRec = r;
   W.rem = $('#d-rem').kendoTextArea({ rows: 3, maxLength: 500, placeholder: 'What happened — delays, breakdowns, early completion, pilot late…', size: 'large', resize: 'vertical' }).data('kendoTextArea');
   $('#d-rem').on('input', () => setMsg('d-rem', ''));
   W.save = kButton('#d-save', { themeColor: 'primary' });
@@ -1055,69 +1187,76 @@ function renderDeparture(v) {
 }
 
 function evalDeparture(r) {
+  dtSync('dep');
   const t = { ll: readTime(W.ll), po: readTime(W.po), srt: readTime(W.srt), line: readTime(W.line) };
   let ok = true;
   Object.entries({ 'd-ll': t.ll, 'd-po': t.po, 'd-srt': t.srt, 'd-line': t.line }).forEach(([id, x]) => {
     if (x.bad) { setMsg(id, 'Enter time as HH:mm', 'error'); ok = false; } else setMsg(id, '');
   });
-  if (t.ll.hm) {
-    const dev = circDiff(r.predicted_last_lift_time, t.ll.hm);
-    setMsg('d-ll', `${dev > 0 ? '+' : ''}${dev} min vs predicted ${esc(r.predicted_last_lift_time)}`, Math.abs(dev) <= 30 ? 'ok' : 'warn');
+  const LL = readDT('d-ll'), PO = readDT('d-po'), SR = readDT('d-srt'), LN = readDT('d-line');
+  // Prediction times as full date-times (legacy rows without *_at are placed nearest the actual last lift)
+  const anchor = LL ? LL.dt : new Date();
+  const srtAt = recAt(r, 'suggested_srt_at', 'suggested_srt', anchor);
+  const predAt = recAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time', anchor);
+  const winStartAt = addMin(srtAt, -TARGET.srtWindow);
+  const winStart = toHM(winStartAt);
+  if (LL) {
+    const dev = diffMin(predAt, LL.dt);
+    setMsg('d-ll', `${dev > 0 ? '+' : ''}${dev} min vs predicted ${esc(fmtAt(predAt))}`, Math.abs(dev) <= 30 ? 'ok' : 'warn');
   }
-  if (t.ll.hm && t.line.hm && circDiff(t.ll.hm, t.line.hm) < 0) {
+  if (LL && LN && LN.dt < LL.dt) {
     setMsg('d-line', '<i class="ti ti-alert-triangle"></i> Earlier than Actual Last Lift', 'error'); ok = false;
   }
 
   const box = $('#dep-result');
-  const srtCls = t.ll.hm ? classifySRT(r.suggested_srt, t.ll.hm) : null;
-  const winStart = toHM(addMin(hmToDate(r.suggested_srt), -TARGET.srtWindow));
+  const srtCls = LL ? ((LL.dt >= winStartAt && LL.dt <= srtAt) ? 'GOOD' : 'NOT QUALITY') : null;
   let html = `<div class="res-head">Departure result</div>`;
-
-  // SRT compliance
   html += `<div class="res-block">
     <div class="res-row"><span>SRT compliance</span>${srtCls ? badge(srtCls) : '<span class="muted">needs last lift</span>'}</div>
-    ${srtWindowViz(r.suggested_srt, t.ll.hm)}
-    <div class="res-note">GOOD window ${winStart} – ${esc(r.suggested_srt)}</div>
+    ${srtWindowViz(r.suggested_srt, LL ? LL.hm : null, LL ? diffMin(srtAt, LL.dt) : null)}
+    <div class="res-note">GOOD window ${winStart} – ${esc(fmtAt(srtAt))}</div>
   </div>`;
 
-  if (t.ll.hm && t.line.hm && ok) {
-    const qsail = circDiff(t.ll.hm, t.line.hm);
+  const qsStart = +r.quick_start_minutes || 0;
+  if (LL && LN && ok) {
+    const qsail = diffMin(LL.dt, LN.dt);
     const qsailCls = classify(qsail, TARGET.qsail);
-    const idle = (+r.quick_start_minutes) + qsail;
+    const idle = qsStart + qsail;
     const idleCls = classify(idle, TARGET.idle);
     html += `<div class="res-block">
       <div class="res-row"><span>Quick Sail <em>Last Line − Last Lift</em></span><b>${qsail} min</b>${badge(qsailCls)}</div>
       ${gauge(qsail, TARGET.qsail)}
     </div>
     <div class="res-block">
-      <div class="res-row"><span>Total Idle <em>QS ${esc(r.quick_start_minutes)} + QSail ${qsail}</em></span><b>${idle} min</b>${badge(idleCls)}</div>
+      <div class="res-row"><span>Total Idle <em>QS ${esc(qsStart)} + QSail ${qsail}</em></span><b>${idle} min</b>${badge(idleCls)}</div>
       ${gauge(idle, TARGET.idle)}
+      ${qsStart < 0 ? `<div class="res-note">Includes a negative Quick Start (${qsStart} min) from arrival.</div>` : ''}
     </div>`;
-  } else if (!ok && t.line.hm) {
-    html += `<div class="res-error"><i class="ti ti-alert-octagon"></i><div><b>Sequence error</b><br>Last Line (${t.line.hm}) is earlier than Last Lift (${t.ll.hm}).</div></div>`;
+  } else if (!ok && LN) {
+    html += `<div class="res-error"><i class="ti ti-alert-octagon"></i><div><b>Sequence error</b><br>Last Line (${esc(fmtDT(LN.dt))}) is earlier than Last Lift (${esc(LL ? fmtDT(LL.dt) : '')}).</div></div>`;
   } else {
     html += `<div class="res-empty sm"><i class="ti ti-hourglass-empty"></i><div>Enter Actual Last Lift and Last Line to see Quick Sail and Total Idle.</div></div>`;
   }
   box.html(html);
 
-  const allSet = t.ll.hm && t.po.hm && t.srt.hm && t.line.hm;
-  if (!ok || !allSet) return null;
-  const qsail = circDiff(t.ll.hm, t.line.hm);
-  const idle = (+r.quick_start_minutes) + qsail;
+  if (!ok || !(LL && PO && SR && LN)) return null;
+  const qsail = diffMin(LL.dt, LN.dt);
+  const idle = qsStart + qsail;
   return {
-    ll: t.ll.hm, po: t.po.hm, srt: t.srt.hm, line: t.line.hm, winStart,
-    srtCls, dev: circDiff(r.predicted_last_lift_time, t.ll.hm),
+    ll: LL.hm, po: PO.hm, srt: SR.hm, line: LN.hm, winStart,
+    llAt: LL.dt, poAt: PO.dt, srtAtActual: SR.dt, lineAt: LN.dt, srtAt, predAt,
+    srtCls, dev: diffMin(predAt, LL.dt),
     qsail, qsailCls: classify(qsail, TARGET.qsail), idle, idleCls: classify(idle, TARGET.idle)
   };
 }
 
-function srtWindowViz(srt, ll) {
+function srtWindowViz(srt, ll, offMin) {
   // 60-minute axis: SRT-45 … SRT+15; window is SRT-15 … SRT
   const span = 60, startOff = -45;
   const pos = m => ((m - startOff) / span) * 100;
   let marker = '';
   if (ll) {
-    const off = -circDiff(ll, srt);              // ll relative to srt (negative = before)
+    const off = offMin != null ? offMin : -circDiff(ll, srt);   // ll relative to srt (negative = before)
     const clamped = Math.max(startOff, Math.min(startOff + span, off));
     const good = off >= -TARGET.srtWindow && off <= 0;
     const p = pos(clamped);
@@ -1150,13 +1289,13 @@ function confirmDeparture(r) {
       ${cfLead}
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
       ${cfSec('Prediction')}
-      ${cfKV('Predicted last lift', esc(r.predicted_last_lift_time))}
-      ${cfKV('Recommended SRT', esc(r.suggested_srt), `<span class="muted sm">GOOD ${esc(res.winStart)}–${esc(r.suggested_srt)}</span>`)}
+      ${cfKV('Predicted last lift', esc(fmtDT(res.predAt)))}
+      ${cfKV('Recommended SRT', esc(fmtDT(res.srtAt)), `<span class="muted sm">GOOD ${esc(res.winStart)}–${esc(toHM(res.srtAt))}</span>`)}
       ${cfSec('Actual departure times')}
-      ${cfKV('Actual last lift', esc(res.ll), `<span class="muted sm">${res.dev > 0 ? '+' : ''}${res.dev} min vs pred.</span>`)}
-      ${cfKV('Pilot onboard', esc(res.po))}
-      ${cfKV('Actual SRT', esc(res.srt))}
-      ${cfKV('Last line', esc(res.line))}
+      ${cfKV('Actual last lift', esc(fmtDT(res.llAt)), `<span class="muted sm">${res.dev > 0 ? '+' : ''}${res.dev} min vs pred.</span>`)}
+      ${cfKV('Pilot onboard', esc(fmtDT(res.poAt)))}
+      ${cfKV('Actual SRT', esc(fmtDT(res.srtAtActual)))}
+      ${cfKV('Last line', esc(fmtDT(res.lineAt)))}
       ${cfSec('Result')}
       ${cfKV('SRT compliance', '', badge(res.srtCls))}
       ${cfKV('Quick Sail', res.qsail + ' min', badge(res.qsailCls))}
@@ -1179,6 +1318,8 @@ async function saveDeparture(r) {
   const upd = {
     actual_last_lift_time: res.ll, actual_pilot_onboard_time: res.po, actual_srt_time: res.srt,
     last_line_time: res.line, srt_window_start: res.winStart, srt_window_end: r.suggested_srt,
+    actual_last_lift_at: res.llAt.toISOString(), pilot_onboard_at: res.poAt.toISOString(),
+    actual_srt_at: res.srtAtActual.toISOString(), last_line_at: res.lineAt.toISOString(),
     srt_class: res.srtCls, deviation_minutes: res.dev,
     quick_sail_minutes: res.qsail, quick_sail_class: res.qsailCls,
     total_idle_minutes: res.idle, total_idle_class: res.idleCls,
@@ -1297,23 +1438,23 @@ function openRecord(r) {
   let html = `<div class="detail">
     <div class="d-head"><div><div class="d-name">${esc(r.vessel_name)}</div><div class="d-sub">${esc(r.vessel_reference)} · ${esc(fmtDateTime(r.created_at))}</div></div>${phasePill(r)}</div>
     <div class="d-sec"><div class="d-sec-t"><span class="dot">1</span>Arrival <em>by ${esc(r.operator_id)}</em></div>
-      ${row('First line', r.first_line_time)}${row('Vessel secured (RTW)', r.rtw_time)}${row('First lift', r.first_lift_time)}
-      ${row('Quick Start', r.quick_start_minutes + ' min', badge(r.quick_start_class))}
+      ${row('First line', showAt(r, 'first_line_at', 'first_line_time'))}${row('Vessel secured (RTW)', showAt(r, 'rtw_at', 'rtw_time'))}${row('First lift', showAt(r, 'first_lift_at', 'first_lift_time'))}
+      ${row('Quick Start', r.quick_start_minutes + ' min', badge(r.quick_start_class) + (+r.quick_start_minutes < 0 ? '<span class="pill pill-edit" title="First Lift before RTW">negative</span>' : ''))}
       ${remark(r.arrival_remarks)}
     </div>`;
   if (r.predicted_last_lift_time) {
     html += `<div class="d-sec"><div class="d-sec-t"><span class="dot">2</span>Departure prediction ${r.prediction_edited ? `<span class="pill pill-edit"><i class="ti ti-pencil"></i>Edited ×${esc(r.prediction_edit_count || 1)}</span>` : ''}<em>by ${esc(r.prediction_operator || '—')}</em></div>
       ${row('QC · model', `${r.qc_number} · ${r.qc_model || '—'}`)}${row('CMPH', r.cmph)}
       ${row('Total operation time', (+r.total_min).toFixed(1) + ' min')}
-      ${row('Predicted last lift', r.predicted_last_lift_time)}${row('Recommended SRT', r.suggested_srt)}
+      ${row('Predicted last lift', showAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time'))}${row('Recommended SRT', showAt(r, 'suggested_srt_at', 'suggested_srt'))}
       ${remark(r.prediction_remarks)}
       ${r.prediction_edited ? `<div class="audit-note"><i class="ti ti-history"></i><div>Edited <b>${esc(r.prediction_edit_count || 1)}×</b> · last by <b>${esc(r.prediction_last_edited_by || '—')}</b>${r.prediction_last_edited_at ? ' · ' + esc(fmtDateTime(r.prediction_last_edited_at)) : ''}${r.prediction_edit_reason ? `<br>Reason: ${esc(r.prediction_edit_reason)}` : ''}</div></div>` : ''}
     </div>`;
   }
   if (r.actual_last_lift_time) {
     html += `<div class="d-sec"><div class="d-sec-t"><span class="dot">3</span>Actual departure <em>by ${esc(r.departure_operator || '—')}</em></div>
-      ${row('Actual last lift', r.actual_last_lift_time)}${row('Pilot onboard', r.actual_pilot_onboard_time)}
-      ${row('Actual SRT', r.actual_srt_time)}${row('Last line', r.last_line_time)}
+      ${row('Actual last lift', showAt(r, 'actual_last_lift_at', 'actual_last_lift_time'))}${row('Pilot onboard', showAt(r, 'pilot_onboard_at', 'actual_pilot_onboard_time'))}
+      ${row('Actual SRT', showAt(r, 'actual_srt_at', 'actual_srt_time'))}${row('Last line', showAt(r, 'last_line_at', 'last_line_time'))}
       ${row('SRT window', `${r.srt_window_start} – ${r.srt_window_end}`, badge(r.srt_class))}
       ${row('LL deviation (actual − predicted)', `${r.deviation_minutes > 0 ? '+' : ''}${r.deviation_minutes} min`)}
       ${row('Quick Sail', r.quick_sail_minutes + ' min', badge(r.quick_sail_class))}
@@ -1367,7 +1508,7 @@ function editedTimes(r, newTotal) {
   let ll;
   if (r.prediction_base_at) ll = addMin(new Date(r.prediction_base_at), newTotal);
   else if (r.predicted_last_lift_at) ll = addMin(new Date(r.predicted_last_lift_at), delta);
-  else ll = addMin(hmToDate(r.predicted_last_lift_time), Math.round(delta));
+  else ll = addMin(recAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time'), Math.round(delta));
   const srt = roundUpTo15(ll);
   return { ll, srt, llHM: toHM(ll), srtHM: toHM(srt) };
 }
@@ -1376,8 +1517,8 @@ let EP = null;   // edit-prediction dialog state
 
 function openEditPrediction(r) {
   EP = { r, w: {} };
-  const madeAt = r.prediction_base_at ? fmtDateTime(r.prediction_base_at)
-    : `${toHM(addMin(hmToDate(r.predicted_last_lift_time), -Math.round(+r.total_min || 0)))} (prediction time)`;
+  const madeAt = r.prediction_base_at ? fmtDT(new Date(r.prediction_base_at))
+    : fmtDT(addMin(recAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time'), -Math.round(+r.total_min || 0)));
   const html = `<div class="ep">
     <div class="cf-note"><i class="ti ti-info-circle"></i><div>Recalculated from the original prediction time <b>${esc(madeAt)}</b> — not from now.
       Every edit is marked on the record and logged in the audit trail with your ID and reason.</div></div>
@@ -1444,10 +1585,14 @@ function editBuild() {
   // keep the full date-time columns in step when the record has them
   if (r.predicted_last_lift_at || r.prediction_base_at) upd.predicted_last_lift_at = t.ll.toISOString();
   if (r.suggested_srt_at || r.prediction_base_at) upd.suggested_srt_at = t.srt.toISOString();
-  if (r.actual_last_lift_time) Object.assign(upd, {
-    srt_window_start: toHM(addMin(t.srt, -TARGET.srtWindow)), srt_window_end: t.srtHM,
-    srt_class: classifySRT(t.srtHM, r.actual_last_lift_time), deviation_minutes: circDiff(t.llHM, r.actual_last_lift_time)
-  });
+  if (r.actual_last_lift_time) {
+    const act = recAt(r, 'actual_last_lift_at', 'actual_last_lift_time', t.ll);
+    Object.assign(upd, {
+      srt_window_start: toHM(addMin(t.srt, -TARGET.srtWindow)), srt_window_end: t.srtHM,
+      srt_class: (act >= addMin(t.srt, -TARGET.srtWindow) && act <= t.srt) ? 'GOOD' : 'NOT QUALITY',
+      deviation_minutes: diffMin(t.ll, act)
+    });
+  }
   const changed = Object.keys(upd).filter(k => !sameVal(r[k], upd[k]));
   return { upd, changed, t, res };
 }
@@ -1460,8 +1605,8 @@ function editPreview() {
   const r = EP.r;
   const chg = (o, n) => o !== n ? 'chg' : '';
   box.html(`<div class="pred-times">
-      <div class="pt"><span>Predicted last lift</span><b class="t-blue ${chg(r.predicted_last_lift_time, b.t.llHM)}">${b.t.llHM}</b><em>was ${esc(r.predicted_last_lift_time)}</em></div>
-      <div class="pt srt"><span>Recommended SRT</span><b class="${chg(r.suggested_srt, b.t.srtHM)}">${b.t.srtHM}</b><em>was ${esc(r.suggested_srt)}</em></div>
+      <div class="pt"><span>Predicted last lift</span><b class="t-blue ${chg(r.predicted_last_lift_time, b.t.llHM)}">${b.t.llHM}</b><em>${esc(fmtDay(ymd(b.t.ll)))} · was ${esc(r.predicted_last_lift_time)}</em></div>
+      <div class="pt srt"><span>Recommended SRT</span><b class="${chg(r.suggested_srt, b.t.srtHM)}">${b.t.srtHM}</b><em>${esc(fmtDay(ymd(b.t.srt)))} · was ${esc(r.suggested_srt)}</em></div>
     </div>
     <div class="kv"><div class="kv-total"><span>Total operation time</span><b>${b.res.totalMin.toFixed(1)} min <span class="muted">· was ${(+r.total_min || 0).toFixed(1)}</span></b></div>
     ${r.actual_last_lift_time ? `<div><span>SRT compliance (re-evaluated)</span><b>${badge(r.srt_class, r.srt_class === 'GOOD' ? 'GOOD' : 'NQ')} → ${badge(b.upd.srt_class, b.upd.srt_class === 'GOOD' ? 'GOOD' : 'NQ')}</b></div>` : ''}</div>`);
@@ -1750,6 +1895,7 @@ function drawDashCharts(M) {
 }
 
 // ── CSV EXPORT ────────────────────────────────────────────
+const csvDT = v => { if (!v) return ''; const d = new Date(v); return ymd(d) + ' ' + toHM(d); };
 function downloadReport() {
   const done = dashBase().filter(r => r.actual_last_lift_time);
   if (!done.length) { toast('No completed records to export for the selected filter.', 'warning'); return; }
@@ -1757,18 +1903,23 @@ function downloadReport() {
     ['id', 'ID'], ['created_at', 'Created At', v => v ? new Date(v).toLocaleString('en-GB') : ''], ['operator_id', 'Operator ID'],
     ['vessel_name', 'Vessel Name'], ['vessel_reference', 'Vessel Reference'],
     ['first_line_time', 'First Line Time'], ['rtw_time', 'RTW Time'], ['first_lift_time', 'First Lift Time'],
+    ['first_line_at', 'First Line Date-Time', csvDT], ['rtw_at', 'RTW Date-Time', csvDT], ['first_lift_at', 'First Lift Date-Time', csvDT],
     ['quick_start_minutes', 'Quick Start (min)'], ['quick_start_class', 'Quick Start Class'], ['arrival_remarks', 'Arrival Remarks'],
     ['qc_number', 'QC Number'], ['qc_model', 'QC Model'], ['qc_speed', 'QC Speed (m/min)'], ['cmph', 'CMPH'],
     ['f1', 'Normal Container (Unit)'], ['f2', 'Twin Lift (Unit)'], ['f3', 'Gearbox (Unit)'], ['f4', 'Hatch Cover (Unit)'],
     ['f5', 'OOG (Unit)'], ['f6', 'Open Top (Unit)'], ['f7', 'Gantry Movement (Bay)'], ['f8', 'Breakdown (Min)'],
     ['container_min', 'Container Work Time (min)'], ['gantry_min', 'Gantry Travel Time (min)'], ['buffer_min', 'Breakdown Buffer (min)'],
     ['total_min', 'Total Operation Time (min)'], ['predicted_last_lift_time', 'Predicted Last Lift'], ['suggested_srt', 'Suggested SRT'],
+    ['predicted_last_lift_at', 'Predicted Last Lift Date-Time', csvDT], ['suggested_srt_at', 'Suggested SRT Date-Time', csvDT], ['prediction_base_at', 'Prediction Made At', csvDT],
     ['prediction_remarks', 'Prediction Remarks'], ['prediction_operator', 'Prediction Operator'],
     ['prediction_edited', 'Prediction Edited', v => v ? 'YES' : 'NO'], ['prediction_edit_count', 'Prediction Edit Count', v => v || 0],
     ['prediction_last_edited_by', 'Prediction Last Edited By'], ['prediction_last_edited_at', 'Prediction Last Edited At', v => v ? new Date(v).toLocaleString('en-GB') : ''],
     ['prediction_edit_reason', 'Prediction Last Edit Reason'],
     ['actual_last_lift_time', 'Actual Last Lift'], ['actual_pilot_onboard_time', 'Pilot Onboard'], ['actual_srt_time', 'Actual SRT'],
-    ['last_line_time', 'Last Line Time'], ['srt_window_start', 'SRT Window Start'], ['srt_window_end', 'SRT Window End'],
+    ['last_line_time', 'Last Line Time'],
+    ['actual_last_lift_at', 'Actual Last Lift Date-Time', csvDT], ['pilot_onboard_at', 'Pilot Onboard Date-Time', csvDT],
+    ['actual_srt_at', 'Actual SRT Date-Time', csvDT], ['last_line_at', 'Last Line Date-Time', csvDT],
+    ['srt_window_start', 'SRT Window Start'], ['srt_window_end', 'SRT Window End'],
     ['srt_class', 'SRT Class'], ['deviation_minutes', 'LL Deviation (min)'], ['quick_sail_minutes', 'Quick Sail (min)'],
     ['quick_sail_class', 'Quick Sail Class'], ['total_idle_minutes', 'Total Idle (min)'], ['total_idle_class', 'Total Idle Class'],
     ['departure_remarks', 'Departure Remarks'], ['departure_operator', 'Departure Operator']
