@@ -42,8 +42,10 @@ so the app stays on Apache-2.0 components only.
 
 Recommended SRT = predicted last lift rounded up to the next 15-minute mark.
 Poka-yoke: First Line ≤ RTW, and Last Line ≥ Actual Last Lift.
-**Negative Quick Start** is allowed: a First Lift before RTW is saved as a negative value (e.g. −10 min, counted GOOD
-since it is ≤ 20), flagged on screen and in the confirmation, with remarks expected to explain it.
+**Negative Quick Start = ABNORMAL.** A First Lift before RTW is allowed and saved as a negative value (e.g. −10 min),
+but classed `ABNORMAL` (Quick Start, and Total Idle once the call is completed). Abnormal calls are **excluded from the
+Quick Start and Total Idle dashboard scores and averages**; the dashboard states how many were excluded. Older rows with
+a negative Quick Start are treated as abnormal automatically (`mark_abnormal_quick_start.sql` relabels them in the DB).
 
 **Date-aware times.** Every time field carries a date chip. Dates fill in automatically — the first field is today
 (or yesterday if the time is more than an hour ahead), later fields take the date nearest the previous field, so
@@ -52,7 +54,7 @@ use the full date-time, and both the HH:mm columns and the `*_at` timestamp colu
 Older records without `*_at` values are placed on the date nearest their neighbouring times.
 
 ## Workflow
-Each phase ends with **Calculate …** → a confirmation popup showing only the details entered → **Amend** (close and
+Each phase ends with **Calculate …** → a confirmation popup showing only the details entered → **Edit** (close and
 fix) or **Calculate & save**. Results (Quick Start, predicted last lift / SRT, SRT compliance, Quick Sail, Total Idle)
 are hidden while entering data and are shown only after the record is saved. Prediction and Departure have a searchable vessel picker (type part of the name or reference).
 
@@ -81,4 +83,6 @@ and a before/after table is shown before saving. Edited records show an **Edited
 - `migration_prediction_audit.sql` (run once in Supabase → SQL Editor) — adds edit-tracking columns, the read-only
   `vsr_audit_log` table, and a trigger that refuses an edit without a reason + editor ID and logs old → new values
   in the same transaction. **Edit prediction will not save until this has been run.**
+- `mark_abnormal_quick_start.sql` — one-off: relabel existing negative Quick Starts as ABNORMAL.
+- `remove_entries_by_011955.sql` — one-off: backs up and removes every record whose arrival was entered by 011955.
 - `cleanup_incomplete_until_2026-09-28.sql` — one-off: backs up and removes incomplete records created up to 28 Sep 2026.

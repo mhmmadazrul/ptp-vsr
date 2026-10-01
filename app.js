@@ -140,6 +140,11 @@ function roundUpTo15(d) {
   return r;
 }
 const classify = (mins, target) => mins <= target ? 'GOOD' : 'NOT QUALITY';
+// Negative Quick Start (First Lift before RTW) is ABNORMAL: kept on the record, but excluded from the
+// Quick Start and Total Idle scores. Older rows saved before this rule are detected by the negative value.
+const ABN = 'ABNORMAL';
+const classifyQS = mins => mins < 0 ? ABN : classify(mins, TARGET.qs);
+const isAbnormalQS = r => r.quick_start_class === ABN || (r.quick_start_minutes != null && +r.quick_start_minutes < 0);
 function classifySRT(srt, actualLL) {
   const d = circDiff(actualLL, srt);            // minutes from last lift to SRT
   return (d >= 0 && d <= TARGET.srtWindow) ? 'GOOD' : 'NOT QUALITY';
@@ -296,6 +301,7 @@ function toast(msg, type) {
 }
 
 function badge(cls, text) {
+  if (cls === ABN) return `<span class="pill pill-abn" title="Excluded from Quick Start and Total Idle scores"><i class="ti ti-alert-octagon"></i>${esc(text && text !== 'NQ' && text !== 'GOOD' ? text : 'ABNORMAL')}</span>`;
   const good = cls === 'GOOD';
   return `<span class="pill ${good ? 'pill-good' : 'pill-bad'}"><i class="ti ${good ? 'ti-check' : 'ti-alert-triangle'}"></i>${esc(text || cls)}</span>`;
 }
@@ -347,7 +353,7 @@ function afterPopup(w, fn) {
 const cfKV = (k, v, extra, strong) => `<div class="dlg-kv${strong ? ' strong' : ''}"><span>${k}</span>${v === '' ? '' : `<b>${v == null ? '—' : v}</b>`}${extra || ''}</div>`;
 const cfSec = t => `<div class="cf-sec">${t}</div>`;
 const cfRem = t => t ? `<div class="d-rem"><i class="ti ti-message-2"></i>${esc(t)}</div>` : '<div class="d-rem muted"><i class="ti ti-message-2"></i>No remarks</div>';
-const cfLead = '<p class="dlg-p muted">Check the details below. Tap <b>Amend</b> to go back and correct anything.</p>';
+const cfLead = '<p class="dlg-p muted">Check the details below. Tap <b>Edit</b> to go back and correct anything.</p>';
 
 /** Closed filterable dropdown: typing a letter/number opens it with that text already in the search box */
 function typeToSearch(w) {
@@ -786,7 +792,7 @@ function renderArrival(v) {
           ${timeField('a-rtw', 'Vessel secured (RTW)')}
           ${timeField('a-fli', 'First lift')}
         </div>
-        <div class="rule"><i class="ti ti-shield-check"></i><span>Poka-yoke: First Line ≤ RTW. First Lift <b>before</b> RTW is allowed — it is saved as a <b>negative Quick Start</b> (please explain in remarks). Dates fill in automatically, including past midnight; tap a date to change it.</span></div>
+        <div class="rule"><i class="ti ti-shield-check"></i><span>Poka-yoke: First Line ≤ RTW. First Lift <b>before</b> RTW is allowed but flagged <b>ABNORMAL</b> (negative Quick Start, excluded from the Quick Start and Total Idle scores — explain in remarks). Dates fill in automatically, including past midnight; tap a date to change it.</span></div>
       </section>
 
       <section class="card">
@@ -845,7 +851,7 @@ function evalArrival() {
     setMsg('a-rtw', '<i class="ti ti-alert-triangle"></i> Earlier than First Line', 'error'); ok = false;
   }
   // First Lift before RTW is allowed (negative Quick Start) — flagged, not blocked
-  if (ok && B && C && C.dt < B.dt) setMsg('a-fli', '<i class="ti ti-info-circle"></i> Before RTW — allowed, explain in remarks', 'warn');
+  if (ok && B && C && C.dt < B.dt) setMsg('a-fli', '<i class="ti ti-info-circle"></i> Before RTW — will be flagged ABNORMAL, explain in remarks', 'warn');
 
   const box = $('#arr-result');
   if (!(A && B && C)) {
@@ -858,14 +864,14 @@ function evalArrival() {
     return null;
   }
   const qs = diffMin(B.dt, C.dt);
-  const cls = classify(qs, TARGET.qs);
+  const cls = classifyQS(qs);
   const tl = d => d.date === A.date ? d.hm : `${d.hm} <small>${fmtDay(d.date)}</small>`;
   box.html(readyBox('Quick Start', 'Calculate arrival', TARGET.qs));
   const html = (`
     <div class="res-head">Quick Start <span class="res-sub">First Lift − RTW</span></div>
     ${bigMetric(qs, 'min', cls, TARGET.qs)}
     ${gauge(qs, TARGET.qs)}
-    ${qs < 0 ? `<div class="res-neg"><i class="ti ti-arrow-back-up"></i><div><b>Negative Quick Start</b> — first lift ${-qs} min before the vessel was secured. It will be saved as ${qs} min; explain why in remarks.</div></div>` : ''}
+    ${qs < 0 ? `<div class="res-neg"><i class="ti ti-alert-octagon"></i><div><b>Abnormal Quick Start</b> — first lift ${-qs} min before the vessel was secured. Saved as ${qs} min and flagged ABNORMAL, so it is <b>excluded from the Quick Start and Total Idle scores</b>.</div></div>` : ''}
     <div class="timeline">
       ${A.date !== ymd(new Date()) || C.date !== A.date ? `<div class="tl-date">${fmtDay(A.date)}</div>` : ''}
       ${tlStep('First line', tl(A))}
@@ -889,11 +895,11 @@ function resultPlaceholder(title, text, target) {
     ${target != null ? `<div class="res-target">Target ≤ ${target} min</div>` : ''}`;
 }
 function bigMetric(val, unit, cls, target) {
-  return `<div class="big ${cls === 'GOOD' ? 'good' : 'bad'}">
+  return `<div class="big ${cls === 'GOOD' ? 'good' : cls === ABN ? 'abn' : 'bad'}">
       <span class="big-n">${val}</span><span class="big-u">${unit}</span>
       ${badge(cls)}
     </div>
-    <div class="res-target">Target ≤ ${target} ${unit} · ${val < 0 ? `negative (${-val} ${unit} early)` : cls === 'GOOD' ? `${target - val} ${unit} under target` : `${val - target} ${unit} over target`}</div>`;
+    <div class="res-target">Target ≤ ${target} ${unit} · ${val < 0 ? `abnormal — excluded from score` : cls === 'GOOD' ? `${target - val} ${unit} under target` : `${val - target} ${unit} over target`}</div>`;
 }
 function gauge(val, target) {
   const max = Math.max(target * 2, val);
@@ -907,7 +913,7 @@ function gauge(val, target) {
 const tlStep = (label, t) => `<div class="tl-step"><span class="tl-dot"></span><span class="tl-l">${label}</span><span class="tl-t">${t}</span></div>`;
 const tlGap = (m, cls) => `<div class="tl-gap ${cls ? (cls === 'GOOD' ? 'good' : 'bad') : ''}">${m} min</div>`;
 
-/** Validate, then show the confirmation popup (Amend / Calculate & save) */
+/** Validate, then show the confirmation popup (Edit / Calculate & save) */
 function confirmArrival() {
   const vessel = String(W.vessel.value() || '').trim().toUpperCase();
   const ref = String(W.ref.value() || '').trim().toUpperCase();
@@ -935,12 +941,12 @@ function confirmArrival() {
       ${cfKV('First line', esc(fmtDT(r.flAt)))}
       ${cfKV('Vessel secured (RTW)', esc(fmtDT(r.rtwAt)))}
       ${cfKV('First lift', esc(fmtDT(r.fliAt)))}
-      ${r.qs < 0 ? `<div class="cf-warn"><i class="ti ti-arrow-back-up"></i><div>First Lift is <b>before</b> RTW — this is allowed. Make sure the remarks explain why.</div></div>` : ''}
+      ${r.qs < 0 ? `<div class="cf-warn"><i class="ti ti-arrow-back-up"></i><div>First Lift is <b>before</b> RTW — the Quick Start will be flagged <b>ABNORMAL</b> and left out of the Quick Start and Total Idle scores. Make sure the remarks explain why.</div></div>` : ''}
       ${cfSec('Remarks')}
       ${cfRem(rem)}
     </div>`,
     actions: [
-      { text: 'Amend' },
+      { text: 'Edit' },
       { text: 'Calculate & save', primary: true, action: () => { saveArrival({ vessel, ref, rem, r }); return true; } }
     ]
   });
@@ -1014,7 +1020,7 @@ function selectedStrip(r, extra) {
   return `<div class="sel-strip">
     <div class="sel-v"><i class="ti ti-ship"></i><div><b>${esc(r.vessel_name)}</b><span>${esc(r.vessel_reference)} · by ${esc(r.operator_id)} · ${esc(fmtDateTime(r.created_at))}</span></div></div>
     <div class="sel-kpis">
-      <div><span>Quick Start</span><b>${esc(r.quick_start_minutes)}m</b>${badge(r.quick_start_class, r.quick_start_class === 'GOOD' ? 'GOOD' : 'NQ')}</div>
+      <div><span>Quick Start</span><b>${esc(r.quick_start_minutes)}m</b>${badge(isAbnormalQS(r) ? ABN : r.quick_start_class, r.quick_start_class === 'GOOD' ? 'GOOD' : 'NQ')}</div>
       ${extra || ''}
     </div>
     <button class="link-btn" data-change>Change vessel</button>
@@ -1194,7 +1200,7 @@ function evalPrediction() {
   return { res, ll, srt, qc, speed, now, html };
 }
 
-/** Validate, then show the confirmation popup (Amend / Calculate & save) */
+/** Validate, then show the confirmation popup (Edit / Calculate & save) */
 function confirmPrediction() {
   const d = S.predDraft;
   const errs = [];
@@ -1222,7 +1228,7 @@ function confirmPrediction() {
       <div class="cf-note"><i class="ti ti-clock"></i><div>Predicted last lift and SRT are calculated from the moment you tap <b>Calculate &amp; save</b>.</div></div>
     </div>`,
     actions: [
-      { text: 'Amend' },
+      { text: 'Edit' },
       { text: 'Calculate & save', primary: true, action: () => { savePrediction(); return true; } }
     ]
   });
@@ -1380,7 +1386,7 @@ function evalDeparture(r) {
     const qsail = diffMin(LL.dt, LN.dt);
     const qsailCls = classify(qsail, TARGET.qsail);
     const idle = qsStart + qsail;
-    const idleCls = classify(idle, TARGET.idle);
+    const idleCls = isAbnormalQS(r) ? ABN : classify(idle, TARGET.idle);
     const dev = diffMin(predAt, LL.dt);
     html = `<div class="res-block">
       <div class="res-row"><span>SRT compliance</span>${badge(srtCls)}</div>
@@ -1394,7 +1400,7 @@ function evalDeparture(r) {
     <div class="res-block">
       <div class="res-row"><span>Total Idle <em>QS ${esc(qsStart)} + QSail ${qsail}</em></span><b>${idle} min</b>${badge(idleCls)}</div>
       ${gauge(idle, TARGET.idle)}
-      ${qsStart < 0 ? `<div class="res-note">Includes a negative Quick Start (${qsStart} min) from arrival.</div>` : ''}
+      ${isAbnormalQS(r) ? `<div class="res-note">Abnormal Quick Start (${qsStart} min) from arrival — Total Idle is recorded but excluded from the score.</div>` : ''}
     </div>`;
   }
 
@@ -1405,7 +1411,7 @@ function evalDeparture(r) {
     ll: LL.hm, po: PO.hm, srt: SR.hm, line: LN.hm, winStart,
     llAt: LL.dt, poAt: PO.dt, srtAtActual: SR.dt, lineAt: LN.dt, srtAt, predAt,
     srtCls, dev: diffMin(predAt, LL.dt),
-    qsail, qsailCls: classify(qsail, TARGET.qsail), idle, idleCls: classify(idle, TARGET.idle), html
+    qsail, qsailCls: classify(qsail, TARGET.qsail), idle, idleCls: isAbnormalQS(r) ? ABN : classify(idle, TARGET.idle), html
   };
 }
 
@@ -1430,7 +1436,7 @@ function srtWindowViz(srt, ll, offMin) {
   </div>`;
 }
 
-/** Validate, then show the confirmation popup (Amend / Calculate & save) */
+/** Validate, then show the confirmation popup (Edit / Calculate & save) */
 function confirmDeparture(r) {
   const res = evalDeparture(r);
   const rem = String(W.rem.value() || '').trim();
@@ -1459,7 +1465,7 @@ function confirmDeparture(r) {
       ${cfRem(rem)}
     </div>`,
     actions: [
-      { text: 'Amend' },
+      { text: 'Edit' },
       { text: 'Calculate & save', primary: true, action: () => { saveDeparture(r); return true; } }
     ]
   });
@@ -1494,7 +1500,7 @@ async function saveDeparture(r) {
     title: 'Vessel call completed',
     html: `<div class="dlg-sum">
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
-      <div class="dlg-kv"><span>Quick Start <em class="muted">from arrival</em></span><b>${r.quick_start_minutes} min</b>${badge(r.quick_start_class)}</div>
+      <div class="dlg-kv"><span>Quick Start <em class="muted">from arrival</em></span><b>${r.quick_start_minutes} min</b>${badge(isAbnormalQS(r) ? ABN : r.quick_start_class)}</div>
       <div class="result-in-dlg">${res.html}</div>
     </div>`,
     width: 460,
@@ -1568,11 +1574,11 @@ function renderRecords(v) {
 function recordRow(r) {
   const ph = phaseOf(r);
   const chips = [];
-  if (r.quick_start_minutes != null) chips.push(miniChip('QS', r.quick_start_minutes, r.quick_start_class));
+  if (r.quick_start_minutes != null) chips.push(miniChip('QS', r.quick_start_minutes, isAbnormalQS(r) ? ABN : r.quick_start_class));
   if (r.suggested_srt) chips.push(`<span class="mchip"><em>SRT</em>${esc(r.suggested_srt)}</span>`);
   if (ph === 'completed') {
     chips.push(miniChip('QSail', r.quick_sail_minutes, r.quick_sail_class));
-    chips.push(miniChip('Idle', r.total_idle_minutes, r.total_idle_class));
+    chips.push(miniChip('Idle', r.total_idle_minutes, isAbnormalQS(r) ? ABN : r.total_idle_class));
   }
   return `<div class="rec-row" data-id="${esc(r.id)}" role="button" tabindex="0">
     <div class="rec-ic ${PHASES[ph].cls}"><i class="ti ${ph === 'completed' ? 'ti-circle-check' : 'ti-ship'}"></i></div>
@@ -1584,7 +1590,7 @@ function recordRow(r) {
     <div class="rec-side">${r.prediction_edited ? `<span class="pill pill-edit" title="Prediction edited ${esc(r.prediction_edit_count || 1)}×"><i class="ti ti-pencil"></i>Edited</span>` : ''}${phasePill(r)}${ph === 'completed' ? `<span class="rec-srt">${badge(r.srt_class, 'SRT ' + (r.srt_class === 'GOOD' ? 'GOOD' : 'NQ'))}</span>` : ''}<i class="ti ti-chevron-right rec-chev"></i></div>
   </div>`;
 }
-const miniChip = (k, v, cls) => `<span class="mchip ${cls === 'GOOD' ? 'good' : 'bad'}"><em>${k}</em>${esc(v)}m</span>`;
+const miniChip = (k, v, cls) => `<span class="mchip ${cls === ABN ? 'abn' : cls === 'GOOD' ? 'good' : 'bad'}" ${cls === ABN ? 'title="Abnormal — excluded from scores"' : ''}><em>${k}</em>${esc(v)}m</span>`;
 
 function openRecord(r) {
   const ph = phaseOf(r);
@@ -1594,7 +1600,7 @@ function openRecord(r) {
     <div class="d-head"><div><div class="d-name">${esc(r.vessel_name)}</div><div class="d-sub">${esc(r.vessel_reference)} · ${esc(fmtDateTime(r.created_at))}</div></div>${phasePill(r)}</div>
     <div class="d-sec"><div class="d-sec-t"><span class="dot">1</span>Arrival <em>by ${esc(r.operator_id)}</em></div>
       ${row('First line', showAt(r, 'first_line_at', 'first_line_time'))}${row('Vessel secured (RTW)', showAt(r, 'rtw_at', 'rtw_time'))}${row('First lift', showAt(r, 'first_lift_at', 'first_lift_time'))}
-      ${row('Quick Start', r.quick_start_minutes + ' min', badge(r.quick_start_class) + (+r.quick_start_minutes < 0 ? '<span class="pill pill-edit" title="First Lift before RTW">negative</span>' : ''))}
+      ${row('Quick Start', r.quick_start_minutes + ' min', badge(isAbnormalQS(r) ? ABN : r.quick_start_class))}
       ${remark(r.arrival_remarks)}
     </div>`;
   if (r.predicted_last_lift_time) {
@@ -1613,7 +1619,7 @@ function openRecord(r) {
       ${row('SRT window', `${r.srt_window_start} – ${r.srt_window_end}`, badge(r.srt_class))}
       ${row('LL deviation (actual − predicted)', `${r.deviation_minutes > 0 ? '+' : ''}${r.deviation_minutes} min`)}
       ${row('Quick Sail', r.quick_sail_minutes + ' min', badge(r.quick_sail_class))}
-      ${row('Total Idle', r.total_idle_minutes + ' min', badge(r.total_idle_class))}
+      ${row('Total Idle', r.total_idle_minutes + ' min', badge(isAbnormalQS(r) ? ABN : r.total_idle_class))}
       ${remark(r.departure_remarks)}
     </div>`;
   }
@@ -1781,7 +1787,7 @@ function reviewEditPrediction() {
     width: 540,
     html: `<div class="dlg-sum">
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
-      <p class="dlg-p muted">These changes will be saved and logged in the audit trail. Tap <b>Amend</b> to go back.</p>
+      <p class="dlg-p muted">These changes will be saved and logged in the audit trail. Tap <b>Edit</b> to go back.</p>
       ${diffTable(shown.map(k => [k, r[k], b.upd[k]]))}
       ${cfSec('Audit entry')}
       ${cfKV('Edited by', esc(S.operator))}
@@ -1789,7 +1795,7 @@ function reviewEditPrediction() {
       ${cfRem(reason)}
     </div>`,
     actions: [
-      { text: 'Amend' },
+      { text: 'Edit' },
       { text: 'Save edit', primary: true, action: () => { saveEditPrediction(r, b.upd, reason); return true; } }
     ]
   });
@@ -1868,11 +1874,13 @@ function metricSet(base) {
     const vals = minKey ? all.map(r => +r[minKey]).filter(n => !isNaN(n)) : [];
     return { good, total: all.length, rate: all.length ? Math.round(good / all.length * 100) : null, avg: vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null };
   };
+  const normal = list => list.filter(r => !isAbnormalQS(r));
   return {
     done,
+    abnormal: base.filter(isAbnormalQS).length,
     srt: m(done, 'srt_class'),
-    idle: m(done, 'total_idle_class', 'total_idle_minutes'),
-    qs: m(base, 'quick_start_class', 'quick_start_minutes'),
+    idle: m(normal(done), 'total_idle_class', 'total_idle_minutes'),
+    qs: m(normal(base), 'quick_start_class', 'quick_start_minutes'),
     qsail: m(done, 'quick_sail_class', 'quick_sail_minutes')
   };
 }
@@ -1906,25 +1914,20 @@ function renderDashboard(v) {
     <div><span>In progress</span><b>${inProg}</b></div>
     <div><span>Avg total idle</span><b>${M.idle.avg != null ? M.idle.avg + '<small>min</small>' : '—'}</b></div>
   </div>
+  ${M.abnormal ? `<div class="abn-note"><i class="ti ti-alert-octagon"></i><b>${M.abnormal}</b> abnormal Quick Start${M.abnormal > 1 ? 's' : ''} (First Lift before RTW) excluded from the Quick Start and Total Idle scores.</div>` : ''}
 
   <div class="donuts">
     ${donutCard('ch-srt', 'SRT compliance', M.srt, 'Last lift within SRT −15 → SRT', null, true)}
-    ${donutCard('ch-idle', 'Total idle', M.idle, `Quick Start + Quick Sail ≤ ${TARGET.idle} min`, TARGET.idle, true)}
-    ${donutCard('ch-qs', 'Quick Start', M.qs, `First Lift − RTW ≤ ${TARGET.qs} min`, TARGET.qs)}
+    ${donutCard('ch-idle', 'Total idle', M.idle, `Quick Start + Quick Sail ≤ ${TARGET.idle} min${M.abnormal ? ' · abnormal excluded' : ''}`, TARGET.idle, true)}
+    ${donutCard('ch-qs', 'Quick Start', M.qs, `First Lift − RTW ≤ ${TARGET.qs} min${M.abnormal ? ' · abnormal excluded' : ''}`, TARGET.qs)}
     ${donutCard('ch-qsail', 'Quick Sail', M.qsail, `Last Line − Last Lift ≤ ${TARGET.qsail} min`, TARGET.qsail)}
   </div>
 
   ${!M.done.length ? `<section class="card">${emptyState('ti-chart-bar', 'No completed vessel calls in this period', 'Charts and the records table fill in once departures are recorded.')}</section>` : `
-  <div class="charts2">
-    <section class="card">
-      <h2 class="card-t"><i class="ti ti-chart-bar"></i>Quick Start vs Quick Sail <span class="card-hint">last 10 completed</span></h2>
-      <div class="chart-box"><canvas id="ch-bar" role="img" aria-label="Quick Start and Quick Sail minutes for the last ten completed vessels"></canvas></div>
-    </section>
-    <section class="card">
-      <h2 class="card-t"><i class="ti ti-trending-up"></i>Weekly GOOD rate</h2>
-      <div class="chart-box"><canvas id="ch-trend" role="img" aria-label="Weekly SRT compliance and total idle GOOD rate"></canvas></div>
-    </section>
-  </div>
+  <section class="card">
+    <h2 class="card-t"><i class="ti ti-chart-bar"></i>Quick Start vs Quick Sail <span class="card-hint">last 10 completed</span></h2>
+    <div class="chart-box"><canvas id="ch-bar" role="img" aria-label="Quick Start and Quick Sail minutes for the last ten completed vessels"></canvas></div>
+  </section>
   <section class="card">
     <h2 class="card-t"><i class="ti ti-table"></i>Recent completed <span class="card-hint">latest 30 · tap a row for detail</span></h2>
     <div class="table-wrap">
@@ -1937,9 +1940,9 @@ function renderDashboard(v) {
           <td class="k-table-td mono">${esc(new Date(r.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }))}</td>
           <td class="k-table-td"><b>${esc(r.vessel_name)}</b><div class="muted sm">${esc(r.vessel_reference)}</div></td>
           <td class="k-table-td">${esc(r.qc_number || '—')}</td>
-          <td class="k-table-td num">${miniChip('', r.quick_start_minutes, r.quick_start_class)}</td>
+          <td class="k-table-td num">${miniChip('', r.quick_start_minutes, isAbnormalQS(r) ? ABN : r.quick_start_class)}</td>
           <td class="k-table-td num">${miniChip('', r.quick_sail_minutes, r.quick_sail_class)}</td>
-          <td class="k-table-td num">${miniChip('', r.total_idle_minutes, r.total_idle_class)}</td>
+          <td class="k-table-td num">${miniChip('', r.total_idle_minutes, isAbnormalQS(r) ? ABN : r.total_idle_class)}</td>
           <td class="k-table-td">${badge(r.srt_class, r.srt_class === 'GOOD' ? 'GOOD' : 'NQ')}</td>
         </tr>`).join('')}</tbody>
       </table>
@@ -2024,30 +2027,6 @@ function drawDashCharts(M) {
     }));
   }
 
-  const tr = document.getElementById('ch-trend');
-  if (tr) {
-    const byWeek = {};
-    M.done.forEach(r => { const k = getWeekKey(new Date(r.created_at)); (byWeek[k] = byWeek[k] || []).push(r); });
-    const keys = Object.keys(byWeek).sort().slice(-12);
-    const rate = (list, key) => Math.round(list.filter(r => r[key] === 'GOOD').length / list.length * 100);
-    charts.push(new Chart(tr, {
-      type: 'line',
-      data: {
-        labels: keys.map(k => k.split('-')[1]),
-        datasets: [
-          { label: 'SRT compliance', data: keys.map(k => rate(byWeek[k], 'srt_class')), borderColor: cBlue, backgroundColor: cBlue, tension: .3, pointRadius: 3.5, borderWidth: 2 },
-          { label: 'Total idle', data: keys.map(k => rate(byWeek[k], 'total_idle_class')), borderColor: cGood, backgroundColor: cGood, tension: .3, pointRadius: 3.5, borderWidth: 2 },
-          { label: `Target ${TARGET.rate}%`, data: keys.map(() => TARGET.rate), borderColor: cMuted, borderDash: [5, 4], borderWidth: 1.2, pointRadius: 0 }
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-        plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true, font: { size: 11 } } },
-          tooltip: { callbacks: { title: i => weekLabel(keys[i[0].dataIndex]) + ` · ${byWeek[keys[i[0].dataIndex]].length} calls`, label: c => `${c.dataset.label}: ${c.parsed.y}%` } } },
-        scales: { y: { min: 0, max: 100, grid: { color: cGrid }, border: { display: false }, ticks: { callback: v => v + '%', stepSize: 25 } }, x: { grid: { display: false } } }
-      }
-    }));
-  }
 }
 
 // ── CSV EXPORT ────────────────────────────────────────────
