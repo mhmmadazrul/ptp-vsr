@@ -50,14 +50,65 @@ const S = {
   loaded: false,
   loading: false,
   arrDraft: { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '', dates: null },
-  predSel: null,
+  predSel: store.get('ptp_predSel') || null,
   predDraft: { qc: '', cmph: null, f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 0, f8: 0, remarks: '' },
-  depSel: null,
+  predDrafts: {},     // { recordId: prediction draft } — one per vessel
+  depSel: store.get('ptp_depSel') || null,
+  depDraft: {},       // { recordId: { ll, po, srt, line, rem, dates } } — survives tab switches
   recFilter: 'all',
   recSearch: '',
   monthFilter: 'all',
   weekFilter: 'all'
 };
+// ── DRAFTS ON THIS DEVICE ─────────────────────────────────
+// Everything typed (all three phases, per vessel) is saved to the phone/PC's local storage as you type,
+// so closing the browser/app, a dropped connection, a reload or switching tabs never loses entries.
+// Drafts are kept per employee ID and cleared when that record is saved.
+const emptyArr = () => ({ vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '', dates: null });
+const emptyPred = () => ({ qc: '', cmph: null, f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 0, f8: 0, remarks: '' });
+const draftKey = () => 'ptp_drafts_' + (S.operator || '_');
+let draftTimer = null;
+function saveDrafts(now) {
+  clearTimeout(draftTimer);
+  const run = () => {
+    if (!S.operator) return;
+    const clean = o => Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v && hasContent(v)));
+    const data = { v: 1, at: Date.now(), arr: hasContent(S.arrDraft) ? S.arrDraft : null, pred: clean(S.predDrafts), dep: clean(S.depDraft) };
+    if (!data.arr && !Object.keys(data.pred).length && !Object.keys(data.dep).length) store.del(draftKey());
+    else store.set(draftKey(), JSON.stringify(data));
+    store.set('ptp_predSel', S.predSel || ''); store.set('ptp_depSel', S.depSel || '');
+    $('.draft-note').html(`<i class="ti ti-device-floppy"></i>Draft kept on this device · ${toHM(new Date())}`).addClass('on');
+  };
+  if (now) run(); else draftTimer = setTimeout(run, 400);
+}
+function hasContent(d) {
+  return d && Object.entries(d).some(([k, v]) => k !== 'dates' && v !== null && v !== '' && v !== 0 && v !== undefined);
+}
+function loadDrafts() {
+  let data = null;
+  try { data = JSON.parse(store.get(draftKey()) || 'null'); } catch (e) { data = null; }
+  if (!data || data.v !== 1 || Date.now() - data.at > 7 * 86400000) return false;   // ignore drafts older than a week
+  // Pin every restored date so a draft reopened tomorrow keeps the dates it was typed with
+  // (only fields that already have a time; empty fields stay automatic)
+  const FIELD = { 'a-fl': 'fl', 'a-rtw': 'rtw', 'a-fli': 'fli', 'd-ll': 'll', 'd-po': 'po', 'd-srt': 'srt', 'd-line': 'line' };
+  const pin = o => { if (o && o.dates) Object.entries(o.dates).forEach(([id, d]) => { d.manual = !!o[FIELD[id]] || d.manual; }); return o; };
+  if (data.arr) S.arrDraft = Object.assign(emptyArr(), pin(data.arr));
+  S.predDrafts = data.pred || {};
+  S.depDraft = {};
+  Object.entries(data.dep || {}).forEach(([id, d]) => { S.depDraft[id] = pin(d); });
+  return hasContent(S.arrDraft) || Object.keys(S.predDrafts).length > 0 || Object.keys(S.depDraft).length > 0;
+}
+/** Drop drafts whose vessel has already moved past that phase (e.g. saved on another phone) */
+function pruneDrafts() {
+  if (!S.loaded) return;
+  Object.keys(S.predDrafts).forEach(id => { const r = S.records.find(x => x.id === id); if (!r || phaseOf(r) !== 'arrival') delete S.predDrafts[id]; });
+  Object.keys(S.depDraft).forEach(id => { const r = S.records.find(x => x.id === id); if (!r || phaseOf(r) !== 'prediction') delete S.depDraft[id]; });
+  saveDrafts(true);
+}
+const draftNote = () => '<div class="draft-note" aria-live="polite"></div>';
+$(document).on('visibilitychange', () => { if (document.visibilityState === 'hidden') saveDrafts(true); });
+$(window).on('pagehide beforeunload', () => saveDrafts(true));
+
 let W = {};          // live Kendo widget refs for the current view
 let charts = [];     // live Chart.js instances
 let clockTimer = null;
@@ -152,7 +203,14 @@ function dtSync(g) {
     if (hm) anchor = mkDT(st.date, hm);
   });
   DT_GROUPS[g].forEach(paintChip);
-  if (g === 'arr') S.arrDraft.dates = JSON.parse(JSON.stringify(DT_GROUPS.arr.reduce((o, id) => (o[id] = { date: DT[id].date, manual: DT[id].manual }, o), {})));
+  const snap = JSON.parse(JSON.stringify(DT_GROUPS[g].reduce((o, id) => (o[id] = { date: DT[id].date, manual: DT[id].manual }, o), {})));
+  if (g === 'arr') S.arrDraft.dates = snap;
+  saveDrafts();
+  if (g === 'dep' && W.depRec && S.depDraft[W.depRec.id]) {
+    const dd = S.depDraft[W.depRec.id];
+    dd.dates = snap;
+    ['ll', 'po', 'srt', 'line'].forEach((k, i) => { const t = DTW[DT_GROUPS.dep[i]] ? readTime(DTW[DT_GROUPS.dep[i]]).hm : null; dd[k] = t; });
+  }
 }
 function paintChip(id) {
   const el = document.getElementById(id + '-dc'); const st = DT[id];
@@ -291,19 +349,42 @@ const cfSec = t => `<div class="cf-sec">${t}</div>`;
 const cfRem = t => t ? `<div class="d-rem"><i class="ti ti-message-2"></i>${esc(t)}</div>` : '<div class="d-rem muted"><i class="ti ti-message-2"></i>No remarks</div>';
 const cfLead = '<p class="dlg-p muted">Check the details below. Tap <b>Amend</b> to go back and correct anything.</p>';
 
+/** Closed filterable dropdown: typing a letter/number opens it with that text already in the search box */
+function typeToSearch(w) {
+  if (!w || !w.wrapper) return w;
+  // Listen on the parent in the capture phase so this runs before Kendo's own key handling
+  const host = w.wrapper[0].parentNode;
+  host.addEventListener('keydown', e => {
+    if (e.target !== w.wrapper[0]) return;
+    if (w.popup && w.popup.visible()) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopImmediatePropagation(); w.open(); return; }
+    if (e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey && !e.altKey && w.options.filter && w.options.filter !== 'none') {
+      e.preventDefault(); e.stopImmediatePropagation();
+      const key = e.key;
+      w.popup.one('activate', () => setTimeout(() => {
+        const f = w.filterInput; if (!f) return;
+        f.val(f.val() + key); try { f[0].setSelectionRange(f.val().length, f.val().length); } catch (x) {}
+        f.trigger('input');                           // Kendo filters on the filter box's input event
+      }, 0));
+      w.open();
+    }
+  }, true);
+  return w;
+}
+
 /** Searchable vessel picker (Kendo DropDownList with filter) used by Prediction and Departure */
 function vesselPicker(sel, list, metaFn, onPick) {
   const w = $(sel).kendoDropDownList({
     dataSource: list.map(r => ({ id: r.id, text: r.vessel_name + ' · ' + r.vessel_reference, vessel: r.vessel_name, ref: r.vessel_reference, meta: metaFn(r) })),
     dataTextField: 'text', dataValueField: 'id',
     optionLabel: 'Search or select vessel…',
-    filter: 'contains', size: 'large', height: 340,
+    filter: 'contains', delay: 120, size: 'large', height: 340,
     template: d => `<div class="qc-opt"><b>${esc(d.vessel)} <span class="muted">· ${esc(d.ref)}</span></b><span>${esc(d.meta)}</span></div>`,
     noDataTemplate: () => '<div class="muted" style="padding:12px">No vessel matches your search</div>',
     change() { const v = this.value(); if (v) afterPopup(this, () => onPick(v)); }
   }).data('kendoDropDownList');
   if (w.filterInput) w.filterInput.attr('placeholder', 'Type vessel name or reference…');
-  return w;
+  return typeToSearch(w);
 }
 
 function setBusy(btn, busy, label) {
@@ -316,19 +397,60 @@ function setBusy(btn, busy, label) {
 function timeField(id, label, hint) {
   return `<div class="fld">
     <div class="fld-top"><label class="k-label fld-label" for="${id}">${label}</label>
-      <button type="button" class="dchip" id="${id}-dc" data-dchip="${id}"></button></div>
+      <button type="button" class="dchip" id="${id}-dc" data-dchip="${id}" tabindex="-1"></button></div>
     <div class="time-row">
       <input id="${id}" />
-      <button type="button" class="now-btn" data-now="${id}" title="Set to current time" aria-label="Set ${label} to current time"><i class="ti ti-clock-bolt"></i>Now</button>
+      <button type="button" class="now-btn" data-now="${id}" tabindex="-1" title="Set to current time" aria-label="Set ${label} to current time"><i class="ti ti-clock-bolt"></i>Now</button>
     </div>
     <div class="fld-msg" id="${id}-msg">${hint || ''}</div>
   </div>`;
+}
+
+/** Accepts 0830, 830, 8:30, 08.30, 8 30 → "08:30" (null if not a valid 24-h time) */
+function normalizeTime(raw) {
+  const s = String(raw || '').trim();
+  let h, m;
+  let x = /^(\d{1,2})[:.\s](\d{2})$/.exec(s);
+  if (x) { h = +x[1]; m = +x[2]; }
+  else if (/^\d{3,4}$/.test(s)) { h = +s.slice(0, s.length - 2); m = +s.slice(-2); }
+  else return null;
+  return h <= 23 && m <= 59 ? pad(h) + ':' + pad(m) : null;
+}
+/** Field-to-field flow for keyboard / numeric-keypad entry */
+const NEXT_FIELD = {
+  'a-vessel': 'a-ref', 'a-ref': 'a-fl', 'a-fl': 'a-rtw', 'a-rtw': 'a-fli', 'a-fli': 'a-rem',
+  'd-ll': 'd-po', 'd-po': 'd-srt', 'd-srt': 'd-line', 'd-line': 'd-rem',
+  'p-cmph': 'p-f1', 'p-f1': 'p-f2', 'p-f2': 'p-f3', 'p-f3': 'p-f4', 'p-f4': 'p-f5', 'p-f5': 'p-f6', 'p-f6': 'p-f7', 'p-f7': 'p-f8', 'p-f8': 'p-rem'
+};
+function focusField(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const w = kendo.widgetInstance($(el));
+  if (w && w.focus && !(w instanceof kendo.ui.TimePicker)) w.focus(); else el.focus();
+  if (el.select && el.tagName === 'INPUT') { try { el.select(); } catch (e) {} }
+}
+const focusNext = id => { if (NEXT_FIELD[id]) focusField(NEXT_FIELD[id]); };   // synchronous: no keystrokes lost on fast typing
+/** Enter in a single-line field jumps to the next field instead of doing nothing */
+function enterToNext(id) {
+  $('#' + id).on('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); focusNext(id); } });
+}
+/** After a failed "Calculate", jump to the first field that needs attention */
+function focusFirstError() {
+  const m = $v().find('.fld-msg.is-error').first();
+  if (!m.length) return;
+  const id = m.attr('id').replace(/-msg$/, '');
+  const el = document.getElementById(id);
+  if (!el) return;
+  (el.closest('.fld') || el).scrollIntoView({ block: 'center', behavior: 'smooth' });
+  setTimeout(() => focusField(id), 300);
 }
 
 function initTimePicker(id, value, onChange) {
   const el = document.getElementById(id);
   el.setAttribute('inputmode', 'numeric');
   el.setAttribute('placeholder', 'HH:mm');
+  el.setAttribute('autocomplete', 'off');
+  el.setAttribute('enterkeyhint', 'next');
   const w = $(el).kendoTimePicker({
     format: 'HH:mm',
     parseFormats: ['HH:mm', 'HHmm', 'H:mm', 'Hmm', 'HH.mm', 'H.mm'],
@@ -337,7 +459,30 @@ function initTimePicker(id, value, onChange) {
     value: value ? hmToDate(value) : null,
     change: onChange
   }).data('kendoTimePicker');
-  $(el).on('keyup', e => { if (e.key === 'Enter') { w.value(w.element.val()); onChange(); } });
+  const commit = () => {
+    const hm = normalizeTime(el.value);
+    if (hm) { el.value = hm; w.value(hmToDate(hm)); w.trigger('change'); return true; }
+    return false;
+  };
+  // Typing a complete time (0830 or 8:30) commits it and moves to the next field — no Tab needed
+  $(el).on('input', () => {
+    setMsg(id, '');                                   // clear a stale error while typing
+    const raw = el.value.trim();
+    el._raw = raw;                                    // remember exactly what was typed (Kendo reformats on blur)
+    if ((/^\d{4}$/.test(raw) || /^\d{1,2}[:.]\d{2}$/.test(raw)) && commit()) focusNext(id);
+  });
+  $(el).on('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); el._raw = null; if (commit() || w.value()) focusNext(id); else onChange(); }
+    else if (e.key === 'Tab') { el._raw = null; commit(); }   // our rules first (e.g. 015 → 00:15)
+  });
+  // On leaving the field (tap elsewhere), apply our reading of what was typed — e.g. 830 → 08:30, 015 → 00:15
+  $(el).on('blur', () => setTimeout(() => {
+    const typed = el._raw; el._raw = null;
+    const hm = typed != null ? normalizeTime(typed) : null;
+    if (hm) { if (!w.value() || toHM(w.value()) !== hm) { el.value = hm; w.value(hmToDate(hm)); w.trigger('change'); } }
+    else if (!w.value() && el.value.trim()) onChange();
+  }, 0));
+  $(el).on('focus', () => { try { el.select(); } catch (e) {} });
   DTW[id] = w;
   return w;
 }
@@ -521,6 +666,7 @@ function go(view, opts) {
   store.set('ptp_view', view);
   if (opts && opts.predSel !== undefined) S.predSel = opts.predSel;
   if (opts && opts.depSel !== undefined) S.depSel = opts.depSel;
+  store.set('ptp_predSel', S.predSel || ''); store.set('ptp_depSel', S.depSel || '');
   $('.tab').each(function () { this.setAttribute('aria-selected', this.getAttribute('data-view') === view); });
   renderView();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -543,6 +689,8 @@ function renderView() {
   const v = $v();
   if (!v.length) return;
   v.off();
+  v.on('input change', 'input, textarea', () => saveDrafts());
+  v.on('click', '.dpop button, [data-now]', () => saveDrafts());
   if (!S.loaded && S.view !== 'arrival') {
     v.html('<div class="loading-block"><span id="ldr"></span><div>Loading records…</div></div>');
     $('#ldr').kendoLoader({ type: 'infinite-spinner', size: 'large' });
@@ -554,6 +702,7 @@ function renderView() {
 /** After a background reload, refresh just the vessel queues / lists without losing typed input */
 function refreshCurrentLists() {
   if (!S.loaded) return;
+  pruneDrafts();
   if (S.view === 'prediction' && !S.predSel) renderView();
   else if (S.view === 'departure' && !S.depSel) renderView();
   else if (S.view === 'records' && W.recDS) { W.recDS.data(filteredRecords()); updateFilterCounts(); }
@@ -593,12 +742,16 @@ function renderLogin(root) {
     const v = String(tb.value() || '').trim().toUpperCase();
     if (!v) { setMsg('op-inp', 'Please enter your employee ID.', 'error'); tb.focus(); return; }
     S.operator = v; store.set('ptp_op', v);
+    const restored = loadDrafts();
     renderRoot();
+    if (restored) toast('Unsaved entries restored from this device', 'info');
     loadRecords().then(() => refreshCurrentLists());
   });
 }
 function logout() {
+  saveDrafts(true);                                   // keep this operator's drafts for when they sign back in
   S.operator = ''; store.del('ptp_op');
+  S.arrDraft = emptyArr(); S.predDrafts = {}; S.predDraft = emptyPred(); S.depDraft = {}; S.predSel = null; S.depSel = null;
   teardownView();
   renderRoot();
 }
@@ -646,6 +799,7 @@ function renderArrival(v) {
     <aside class="col-side">
       <section class="card result sticky" id="arr-result"></section>
       <button id="a-save" class="save-btn"><i class="ti ti-calculator"></i>&nbsp;Calculate arrival</button>
+      ${draftNote()}
       <button id="a-clear" class="link-btn" type="button"><i class="ti ti-eraser"></i> Clear form</button>
     </aside>
   </div>`);
@@ -654,6 +808,8 @@ function renderArrival(v) {
   $('#a-vessel').css('text-transform', 'uppercase').on('input', function () { S.arrDraft.vessel = upperInput(this); setMsg('a-vessel', ''); });
   W.ref = $('#a-ref').kendoTextBox({ placeholder: 'e.g. VOY-2026-001', size: 'large', value: d.reference }).data('kendoTextBox');
   $('#a-ref').css('text-transform', 'uppercase').on('input', function () { S.arrDraft.reference = upperInput(this); setMsg('a-ref', ''); });
+  $('#a-vessel, #a-ref').attr({ autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', enterkeyhint: 'next' });
+  enterToNext('a-vessel'); enterToNext('a-ref');
 
   const onT = () => evalArrival();
   W.fl = initTimePicker('a-fl', d.fl, onT);
@@ -667,7 +823,7 @@ function renderArrival(v) {
 
   W.save = kButton('#a-save', { themeColor: 'primary' });
   W.save.bind('click', confirmArrival);
-  $('#a-clear').on('click', () => { S.arrDraft = { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '', dates: null }; renderView(); });
+  $('#a-clear').on('click', () => { S.arrDraft = emptyArr(); saveDrafts(true); renderView(); });
 
   evalArrival();
 }
@@ -688,13 +844,12 @@ function evalArrival() {
     seqErr = `RTW (${fmtDT(B.dt)}) is earlier than First Line (${fmtDT(A.dt)}).`;
     setMsg('a-rtw', '<i class="ti ti-alert-triangle"></i> Earlier than First Line', 'error'); ok = false;
   }
-  if (ok && A && B) setMsg('a-rtw', `+${diffMin(A.dt, B.dt)} min after First Line`, 'ok');
-  // First Lift before RTW is allowed → negative Quick Start (flagged, not blocked)
-  if (ok && B && C && C.dt < B.dt) setMsg('a-fli', `<i class="ti ti-info-circle"></i> ${diffMin(C.dt, B.dt)} min before RTW — negative Quick Start`, 'warn');
+  // First Lift before RTW is allowed (negative Quick Start) — flagged, not blocked
+  if (ok && B && C && C.dt < B.dt) setMsg('a-fli', '<i class="ti ti-info-circle"></i> Before RTW — allowed, explain in remarks', 'warn');
 
   const box = $('#arr-result');
   if (!(A && B && C)) {
-    box.html(resultPlaceholder('Quick Start', 'Enter all three arrival times to see Quick Start.', TARGET.qs));
+    box.html(resultPlaceholder('Quick Start', 'Enter all three arrival times, then tap Calculate arrival.', TARGET.qs));
     return null;
   }
   if (!ok) {
@@ -705,7 +860,8 @@ function evalArrival() {
   const qs = diffMin(B.dt, C.dt);
   const cls = classify(qs, TARGET.qs);
   const tl = d => d.date === A.date ? d.hm : `${d.hm} <small>${fmtDay(d.date)}</small>`;
-  box.html(`
+  box.html(readyBox('Quick Start', 'Calculate arrival', TARGET.qs));
+  const html = (`
     <div class="res-head">Quick Start <span class="res-sub">First Lift − RTW</span></div>
     ${bigMetric(qs, 'min', cls, TARGET.qs)}
     ${gauge(qs, TARGET.qs)}
@@ -718,9 +874,15 @@ function evalArrival() {
       ${tlGap(qs, cls)}
       ${tlStep('First lift', tl(C))}
     </div>`);
-  return { fl: A.hm, rtw: B.hm, fli: C.hm, flAt: A.dt, rtwAt: B.dt, fliAt: C.dt, qs, cls };
+  return { fl: A.hm, rtw: B.hm, fli: C.hm, flAt: A.dt, rtwAt: B.dt, fliAt: C.dt, qs, cls, html };
 }
 
+/** Side panel once inputs are complete — results stay hidden until Calculate → confirm → save */
+function readyBox(title, btnLabel, target) {
+  return `<div class="res-head">${title}</div>
+    <div class="res-ready"><i class="ti ti-circle-check"></i><div><b>Ready to calculate</b><br>Tap <b>${btnLabel}</b>, check the details in the popup, then <b>Calculate &amp; save</b> to see the result.</div></div>
+    ${target != null ? `<div class="res-target">Target ≤ ${target} min</div>` : ''}`;
+}
 function resultPlaceholder(title, text, target) {
   return `<div class="res-head">${title}</div>
     <div class="res-empty"><i class="ti ti-hourglass-empty"></i><div>${text}</div></div>
@@ -759,7 +921,7 @@ function confirmArrival() {
     errs.push('valid arrival times');
   }
   if (!rem) { setMsg('a-rem', 'Remarks are mandatory', 'error'); errs.push('remarks'); }
-  if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); return; }
+  if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); focusFirstError(); return; }
 
   const dup = S.records.find(x => phaseOf(x) !== 'completed' && x.vessel_name === vessel && String(x.vessel_reference || '').toUpperCase() === ref);
   openDialog({
@@ -773,8 +935,7 @@ function confirmArrival() {
       ${cfKV('First line', esc(fmtDT(r.flAt)))}
       ${cfKV('Vessel secured (RTW)', esc(fmtDT(r.rtwAt)))}
       ${cfKV('First lift', esc(fmtDT(r.fliAt)))}
-      ${cfKV('Quick Start', r.qs + ' min', badge(r.cls), true)}
-      ${r.qs < 0 ? `<div class="cf-warn"><i class="ti ti-arrow-back-up"></i><div><b>Negative Quick Start (${r.qs} min)</b> — First Lift is ${-r.qs} min before RTW. Make sure the remarks explain why.</div></div>` : ''}
+      ${r.qs < 0 ? `<div class="cf-warn"><i class="ti ti-arrow-back-up"></i><div>First Lift is <b>before</b> RTW — this is allowed. Make sure the remarks explain why.</div></div>` : ''}
       ${cfSec('Remarks')}
       ${cfRem(rem)}
     </div>`,
@@ -809,16 +970,17 @@ async function saveArrival({ vessel, ref, rem, r }) {
 
   S.records.unshift(rec);
   updateNavCounts();
-  S.arrDraft = { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '', dates: null };
+  S.arrDraft = emptyArr();
+  saveDrafts(true);
   toast(`Arrival saved · ${rec.vessel_name}`, 'success');
   openDialog({
     title: 'Arrival saved',
     html: `<div class="dlg-sum">
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(rec.vessel_name)} <span>· ${esc(rec.vessel_reference)}</span></div>
-      <div class="dlg-kv"><span>Quick Start</span><b>${rec.quick_start_minutes} min</b>${badge(rec.quick_start_class)}</div>
+      <div class="result-in-dlg">${r.html}</div>
       <p class="dlg-p muted">Next: record the departure prediction once the final crane plan is known.</p>
     </div>`,
-    width: 420,
+    width: 440,
     actions: [
       { text: 'New arrival', action: () => { renderView(); return true; } },
       { text: 'Go to prediction', primary: true, action: () => { go('prediction', { predSel: rec.id }); return true; } }
@@ -878,13 +1040,14 @@ function renderPrediction(v) {
       </div>
       ${queueHTML(pending, null, 'pred')}
     </section>`);
-    const pick = id => { S.predSel = id; S.predDraft = { qc: '', cmph: null, f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 0, f8: 0, remarks: '' }; renderView(); };
+    const pick = id => { S.predSel = id; saveDrafts(true); renderView(); };
     W.pick = vesselPicker('#p-pick', pending, r => `QS ${r.quick_start_minutes} min · arrived ${relTime(r.created_at)}`, pick);
     v.on('click', '.q-item', function () { pick(this.getAttribute('data-id')); });
     return;
   }
 
   const r = S.records.find(x => x.id === S.predSel);
+  S.predDraft = S.predDrafts[S.predSel] || (S.predDrafts[S.predSel] = emptyPred());
   const d = S.predDraft;
   v.html(`
   ${stepper('prediction')}
@@ -926,6 +1089,7 @@ function renderPrediction(v) {
     <aside class="col-side">
       <section class="card result sticky" id="pred-result"></section>
       <button id="p-save" class="save-btn"><i class="ti ti-calculator"></i>&nbsp;Calculate prediction</button>
+      ${draftNote()}
     </aside>
   </div>`);
 
@@ -936,32 +1100,35 @@ function renderPrediction(v) {
     dataTextField: 'qc',
     dataValueField: 'qc',
     optionLabel: 'Select crane…',
-    filter: 'contains',
+    filter: 'contains', delay: 120,
     size: 'large',
     value: d.qc,
     template: q => `<div class="qc-opt"><b>${esc(q.qc)}</b><span>${esc(q.model || '')} · ${esc(q.speed)} m/min</span></div>`,
     valueTemplate: q => q && q.qc ? `<span class="qc-val"><b>${esc(q.qc)}</b> <span>${esc(q.model || '')} · ${esc(q.speed)} m/min</span></span>` : '<span class="k-input-value-text">Select crane…</span>',
-    change() { S.predDraft.qc = this.value(); setMsg('p-qc', ''); evalPrediction(); }
+    change() { S.predDraft.qc = this.value(); setMsg('p-qc', ''); evalPrediction(); if (this.value()) afterPopup(this, () => focusField('p-cmph')); }
   }).data('kendoDropDownList');
+  typeToSearch(W.qc);
 
   $('#p-cmph').attr('inputmode', 'decimal');
   W.cmph = $('#p-cmph').kendoNumericTextBox({
-    min: 1, max: 80, step: 1, decimals: 1, format: '#.#', size: 'large', placeholder: 'e.g. 28', value: d.cmph,
+    min: 1, max: 80, step: 1, decimals: 1, format: '#.#', size: 'large', placeholder: 'e.g. 28', value: d.cmph, selectOnFocus: true,
     suffixOptions: { template: () => 'moves/hr' },
     change() { evalPrediction(); }, spin() { evalPrediction(); }
   }).data('kendoNumericTextBox');
   W.cmph.wrapper.find('input').attr('inputmode', 'decimal');
   $('#p-cmph').on('input', () => evalPrediction());
+  enterToNext('p-cmph');
 
   WORKLOAD.forEach(f => {
     $('#p-' + f.id).attr('inputmode', 'numeric');
     W[f.id] = $('#p-' + f.id).kendoNumericTextBox({
-      min: 0, step: 1, decimals: 0, format: 'n0', size: 'large', placeholder: '0', value: d[f.id] || null,
+      min: 0, step: 1, decimals: 0, format: 'n0', size: 'large', placeholder: '0', value: d[f.id] || null, selectOnFocus: true,
       suffixOptions: { template: () => f.unit },
       change: () => evalPrediction(), spin: () => evalPrediction()
     }).data('kendoNumericTextBox');
     W[f.id].wrapper.find('input').attr('inputmode', 'numeric');
     $('#p-' + f.id).on('input', () => evalPrediction());
+    enterToNext('p-' + f.id);
   });
 
   W.rem = $('#p-rem').kendoTextArea({ rows: 2, maxLength: 500, placeholder: 'Assumptions — e.g. lashing delay expected, re-stow on bay 32…', size: 'large', value: d.remarks, resize: 'vertical' }).data('kendoTextArea');
@@ -971,7 +1138,7 @@ function renderPrediction(v) {
   W.save.bind('click', confirmPrediction);
 
   evalPrediction();
-  clockTimer = setInterval(evalPrediction, 30000);
+
 }
 
 function calcPrediction(f, cmph, qcSpeed) {
@@ -988,26 +1155,19 @@ function evalPrediction() {
   const d = S.predDraft;
   d.cmph = readNum(W.cmph) || null;
   WORKLOAD.forEach(f => { d[f.id] = Math.max(0, readNum(W[f.id])); });
+  saveDrafts();
   const qc = QC_DB.find(q => q.qc === d.qc);
   const speed = qc ? qc.speed : DEFAULT_QC_SPEED;
   const cmph = d.cmph || 0;
   const base = cmph > 0 ? 60 / cmph : 0;
 
-  setMsg('p-cmph', cmph > 0 ? `${base.toFixed(2)} min per move` : '');
-  WORKLOAD.forEach(f => {
-    const q = d[f.id];
-    let t = '';
-    if (f.factor && cmph && q) t = `${(q * base * f.factor).toFixed(1)} min <span class="muted">· ×${f.factor}</span>`;
-    else if (f.id === 'f7' && q) t = `${(q * GANTRY_M_PER_BAY / speed).toFixed(1)} min travel <span class="muted">· ${speed} m/min</span>`;
-    else if (f.id === 'f8' && q) t = 'Added directly to total';
-    setMsg('p-' + f.id, t);
-  });
+  setMsg('p-cmph', ''); WORKLOAD.forEach(f => setMsg('p-' + f.id, ''));
 
   const box = $('#pred-result');
   const totalMoves = WORKLOAD.filter(f => f.factor).reduce((s, f) => s + d[f.id], 0);
   if (!d.qc || !(cmph > 0) || (!totalMoves && !d.f7 && !d.f8)) {
     const need = [!d.qc && 'crane', !(cmph > 0) && 'CMPH', (!totalMoves && !d.f7 && !d.f8) && 'workload'].filter(Boolean).join(', ');
-    box.html(resultPlaceholder('Predicted last lift', `Enter ${need} to see the recommended SRT.`));
+    box.html(resultPlaceholder('Departure prediction', `Enter ${need}, then tap Calculate prediction.`));
     return null;
   }
   const res = calcPrediction(d, cmph, speed);
@@ -1016,10 +1176,11 @@ function evalPrediction() {
   const srt = roundUpTo15(ll);
   const nextDay = ll.getDate() !== now.getDate();
   const parts = [['Container work', res.containerMin, 'c1'], ['Gantry travel', res.gantryMin, 'c2'], ['Breakdown', res.bufferMin, 'c3']];
-  box.html(`
-    <div class="res-head">Departure prediction <span class="res-sub live"><span class="live-dot"></span>live · now ${toHM(now)}</span></div>
+  box.html(readyBox('Departure prediction', 'Calculate prediction'));
+  const html = (`
+    <div class="res-head">Departure prediction <span class="res-sub">calculated at ${toHM(now)}</span></div>
     <div class="pred-times">
-      <div class="pt"><span>Predicted last lift</span><b class="t-blue">${toHM(ll)}</b>${nextDay ? '<em>+1 day</em>' : ''}</div>
+      <div class="pt"><span>Predicted last lift</span><b class="t-blue">${toHM(ll)}</b>${nextDay ? `<em>${fmtDay(ymd(ll))}</em>` : ''}</div>
       <div class="pt srt"><span>Recommended SRT</span><b>${toHM(srt)}</b><em>call pilot for this time</em></div>
     </div>
     <div class="stack" role="img" aria-label="Operation time breakdown">
@@ -1030,7 +1191,7 @@ function evalPrediction() {
       <div class="kv-total"><span>Total operation time</span><b>${res.totalMin.toFixed(1)} min · ${Math.floor(res.totalMin / 60)}h ${pad(Math.round(res.totalMin % 60))}m</b></div>
     </div>
     <div class="rule sm"><i class="ti ti-info-circle"></i>SRT = predicted last lift rounded up to the next 15-min mark. GOOD if actual last lift lands in ${toHM(addMin(srt, -15))}–${toHM(srt)}.</div>`);
-  return { res, ll, srt, qc, speed, now };
+  return { res, ll, srt, qc, speed, now, html };
 }
 
 /** Validate, then show the confirmation popup (Amend / Calculate & save) */
@@ -1039,14 +1200,12 @@ function confirmPrediction() {
   const errs = [];
   if (!d.qc) { setMsg('p-qc', 'Select the last crane', 'error'); errs.push('crane'); }
   if (!(readNum(W.cmph) > 0)) { setMsg('p-cmph', 'CMPH is required', 'error'); errs.push('CMPH'); }
-  if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); return; }
+  if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); focusFirstError(); return; }
   const p = evalPrediction();
-  if (!p) { toast('Enter the remaining workload before saving.', 'warning'); return; }
+  if (!p) { toast('Enter the remaining workload before saving.', 'warning'); focusField('p-f1'); return; }
   const r = S.records.find(x => x.id === S.predSel);
   const rem = String(W.rem.value() || '').trim();
-  const base = 60 / d.cmph;
-  const wl = WORKLOAD.filter(f => +d[f.id] > 0).map(f => cfKV(f.label,
-    `${d[f.id]} ${f.unit.toLowerCase()}` + (f.factor ? ` · ${(d[f.id] * base * f.factor).toFixed(1)} min` : f.id === 'f7' ? ` · ${(d.f7 * GANTRY_M_PER_BAY / p.speed).toFixed(1)} min` : ''))).join('');
+  const wl = WORKLOAD.filter(f => +d[f.id] > 0).map(f => cfKV(f.label, `${d[f.id]} ${f.unit.toLowerCase()}`)).join('');
   openDialog({
     title: 'Confirm prediction details',
     width: 480,
@@ -1055,13 +1214,12 @@ function confirmPrediction() {
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
       ${cfSec('Crane setup')}
       ${cfKV('Last crane (QC)', esc(d.qc), `<span class="muted sm">${esc(p.qc ? p.qc.model : 'default')} · ${esc(p.speed)} m/min</span>`)}
-      ${cfKV('CMPH', esc(d.cmph), `<span class="muted sm">${base.toFixed(2)} min/move</span>`)}
+      ${cfKV('CMPH', esc(d.cmph))}
       ${cfSec('Remaining workload')}
       ${wl}
-      ${cfKV('Total operation time', p.res.totalMin.toFixed(1) + ' min', '', true)}
       ${cfSec('Remarks')}
       ${cfRem(rem)}
-      <div class="cf-note"><i class="ti ti-clock"></i><div>Predicted last lift = the moment you tap <b>Calculate &amp; save</b> + total operation time (≈ <b>${fmtAt(p.ll)}</b>, SRT <b>${fmtAt(p.srt)}</b> if saved now).</div></div>
+      <div class="cf-note"><i class="ti ti-clock"></i><div>Predicted last lift and SRT are calculated from the moment you tap <b>Calculate &amp; save</b>.</div></div>
     </div>`,
     actions: [
       { text: 'Amend' },
@@ -1092,18 +1250,19 @@ async function savePrediction() {
   const rec = S.records.find(x => x.id === id);
   Object.assign(rec, upd);
   updateNavCounts();
+  delete S.predDrafts[id];
   S.predSel = null;
-  S.predDraft = { qc: '', cmph: null, f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 0, f8: 0, remarks: '' };
+  S.predDraft = emptyPred();
+  saveDrafts(true);
   toast(`Prediction saved · ${rec.vessel_name}`, 'success');
   openDialog({
     title: 'Prediction saved',
     html: `<div class="dlg-sum">
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(rec.vessel_name)} <span>· ${esc(rec.vessel_reference)}</span></div>
       <div class="dlg-call"><span>Call pilot for SRT${ymd(p.srt) !== ymd(new Date()) ? ` <em>${fmtDay(ymd(p.srt))}</em>` : ''}</span><b>${esc(upd.suggested_srt)}</b></div>
-      <div class="dlg-kv"><span>Predicted last lift</span><b>${esc(fmtAt(p.ll))}</b></div>
-      <div class="dlg-kv"><span>SRT GOOD window</span><b>${toHM(addMin(p.srt, -15))} – ${esc(upd.suggested_srt)}</b></div>
+      <div class="result-in-dlg">${p.html}</div>
     </div>`,
-    width: 420,
+    width: 460,
     actions: [
       { text: 'Stay here', action: () => { renderView(); return true; } },
       { text: 'Go to departure', primary: true, action: () => { go('departure', { depSel: id }); return true; } }
@@ -1131,7 +1290,7 @@ function renderDeparture(v) {
       </div>
       ${queueHTML(ready, null, 'dep')}
     </section>`);
-    const pick = id => { S.depSel = id; renderView(); };
+    const pick = id => { S.depSel = id; saveDrafts(true); renderView(); };
     W.pick = vesselPicker('#d-pick', ready, r => `SRT ${showAt(r, 'suggested_srt_at', 'suggested_srt')} · QC ${r.qc_number || '—'} · pred. LL ${showAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time')}`, pick);
     v.on('click', '.q-item', function () { pick(this.getAttribute('data-id')); });
     return;
@@ -1167,20 +1326,22 @@ function renderDeparture(v) {
     <aside class="col-side">
       <section class="card result sticky" id="dep-result"></section>
       <button id="d-save" class="save-btn"><i class="ti ti-calculator"></i>&nbsp;Calculate departure</button>
+      ${draftNote()}
     </aside>
   </div>`);
 
   v.on('click', '[data-change]', () => { S.depSel = null; renderView(); });
   const onT = () => evalDeparture(r);
-  W.ll = initTimePicker('d-ll', null, onT);
-  W.po = initTimePicker('d-po', null, onT);
-  W.srt = initTimePicker('d-srt', null, onT);
-  W.line = initTimePicker('d-line', null, onT);
+  const dd = S.depDraft[r.id] || (S.depDraft[r.id] = {});
+  W.ll = initTimePicker('d-ll', dd.ll, onT);
+  W.po = initTimePicker('d-po', dd.po, onT);
+  W.srt = initTimePicker('d-srt', dd.srt, onT);
+  W.line = initTimePicker('d-line', dd.line, onT);
   bindNowButtons({ 'd-ll': W.ll, 'd-po': W.po, 'd-srt': W.srt, 'd-line': W.line });
-  initDTGroup('dep');
+  initDTGroup('dep', dd.dates);
   W.depRec = r;
-  W.rem = $('#d-rem').kendoTextArea({ rows: 3, maxLength: 500, placeholder: 'What happened — delays, breakdowns, early completion, pilot late…', size: 'large', resize: 'vertical' }).data('kendoTextArea');
-  $('#d-rem').on('input', () => setMsg('d-rem', ''));
+  W.rem = $('#d-rem').kendoTextArea({ rows: 3, maxLength: 500, placeholder: 'What happened — delays, breakdowns, early completion, pilot late…', size: 'large', resize: 'vertical', value: dd.rem || '' }).data('kendoTextArea');
+  $('#d-rem').on('input', function () { dd.rem = this.value; setMsg('d-rem', ''); });
   W.save = kButton('#d-save', { themeColor: 'primary' });
   W.save.bind('click', () => confirmDeparture(r));
   evalDeparture(r);
@@ -1200,30 +1361,33 @@ function evalDeparture(r) {
   const predAt = recAt(r, 'predicted_last_lift_at', 'predicted_last_lift_time', anchor);
   const winStartAt = addMin(srtAt, -TARGET.srtWindow);
   const winStart = toHM(winStartAt);
-  if (LL) {
-    const dev = diffMin(predAt, LL.dt);
-    setMsg('d-ll', `${dev > 0 ? '+' : ''}${dev} min vs predicted ${esc(fmtAt(predAt))}`, Math.abs(dev) <= 30 ? 'ok' : 'warn');
-  }
   if (LL && LN && LN.dt < LL.dt) {
     setMsg('d-line', '<i class="ti ti-alert-triangle"></i> Earlier than Actual Last Lift', 'error'); ok = false;
   }
 
   const box = $('#dep-result');
   const srtCls = LL ? ((LL.dt >= winStartAt && LL.dt <= srtAt) ? 'GOOD' : 'NOT QUALITY') : null;
-  let html = `<div class="res-head">Departure result</div>`;
-  html += `<div class="res-block">
-    <div class="res-row"><span>SRT compliance</span>${srtCls ? badge(srtCls) : '<span class="muted">needs last lift</span>'}</div>
-    ${srtWindowViz(r.suggested_srt, LL ? LL.hm : null, LL ? diffMin(srtAt, LL.dt) : null)}
-    <div class="res-note">GOOD window ${winStart} – ${esc(fmtAt(srtAt))}</div>
-  </div>`;
-
   const qsStart = +r.quick_start_minutes || 0;
+  if (!ok && LN && LL && LN.dt < LL.dt) {
+    box.html(`<div class="res-head">Departure result</div><div class="res-error"><i class="ti ti-alert-octagon"></i><div><b>Sequence error</b><br>Last Line (${esc(fmtDT(LN.dt))}) is earlier than Last Lift (${esc(fmtDT(LL.dt))}).</div></div>`);
+  } else if (!(LL && PO && SR && LN)) {
+    box.html(resultPlaceholder('Departure result', 'Enter all four departure times, then tap Calculate departure.'));
+  } else if (ok) {
+    box.html(readyBox('Departure result', 'Calculate departure'));
+  }
+  let html = '';
   if (LL && LN && ok) {
     const qsail = diffMin(LL.dt, LN.dt);
     const qsailCls = classify(qsail, TARGET.qsail);
     const idle = qsStart + qsail;
     const idleCls = classify(idle, TARGET.idle);
-    html += `<div class="res-block">
+    const dev = diffMin(predAt, LL.dt);
+    html = `<div class="res-block">
+      <div class="res-row"><span>SRT compliance</span>${badge(srtCls)}</div>
+      ${srtWindowViz(r.suggested_srt, LL.hm, diffMin(srtAt, LL.dt))}
+      <div class="res-note">GOOD window ${winStart} – ${esc(fmtAt(srtAt))} · last lift ${dev > 0 ? '+' : ''}${dev} min vs predicted ${esc(fmtAt(predAt))}</div>
+    </div>
+    <div class="res-block">
       <div class="res-row"><span>Quick Sail <em>Last Line − Last Lift</em></span><b>${qsail} min</b>${badge(qsailCls)}</div>
       ${gauge(qsail, TARGET.qsail)}
     </div>
@@ -1232,12 +1396,7 @@ function evalDeparture(r) {
       ${gauge(idle, TARGET.idle)}
       ${qsStart < 0 ? `<div class="res-note">Includes a negative Quick Start (${qsStart} min) from arrival.</div>` : ''}
     </div>`;
-  } else if (!ok && LN) {
-    html += `<div class="res-error"><i class="ti ti-alert-octagon"></i><div><b>Sequence error</b><br>Last Line (${esc(fmtDT(LN.dt))}) is earlier than Last Lift (${esc(LL ? fmtDT(LL.dt) : '')}).</div></div>`;
-  } else {
-    html += `<div class="res-empty sm"><i class="ti ti-hourglass-empty"></i><div>Enter Actual Last Lift and Last Line to see Quick Sail and Total Idle.</div></div>`;
   }
-  box.html(html);
 
   if (!ok || !(LL && PO && SR && LN)) return null;
   const qsail = diffMin(LL.dt, LN.dt);
@@ -1246,7 +1405,7 @@ function evalDeparture(r) {
     ll: LL.hm, po: PO.hm, srt: SR.hm, line: LN.hm, winStart,
     llAt: LL.dt, poAt: PO.dt, srtAtActual: SR.dt, lineAt: LN.dt, srtAt, predAt,
     srtCls, dev: diffMin(predAt, LL.dt),
-    qsail, qsailCls: classify(qsail, TARGET.qsail), idle, idleCls: classify(idle, TARGET.idle)
+    qsail, qsailCls: classify(qsail, TARGET.qsail), idle, idleCls: classify(idle, TARGET.idle), html
   };
 }
 
@@ -1281,7 +1440,7 @@ function confirmDeparture(r) {
     errs.push('all four valid times');
   }
   if (!rem) { setMsg('d-rem', 'Remarks are mandatory', 'error'); errs.push('remarks'); }
-  if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); return; }
+  if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); focusFirstError(); return; }
   openDialog({
     title: 'Confirm departure details',
     width: 480,
@@ -1290,16 +1449,12 @@ function confirmDeparture(r) {
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
       ${cfSec('Prediction')}
       ${cfKV('Predicted last lift', esc(fmtDT(res.predAt)))}
-      ${cfKV('Recommended SRT', esc(fmtDT(res.srtAt)), `<span class="muted sm">GOOD ${esc(res.winStart)}–${esc(toHM(res.srtAt))}</span>`)}
+      ${cfKV('Recommended SRT', esc(fmtDT(res.srtAt)))}
       ${cfSec('Actual departure times')}
-      ${cfKV('Actual last lift', esc(fmtDT(res.llAt)), `<span class="muted sm">${res.dev > 0 ? '+' : ''}${res.dev} min vs pred.</span>`)}
+      ${cfKV('Actual last lift', esc(fmtDT(res.llAt)))}
       ${cfKV('Pilot onboard', esc(fmtDT(res.poAt)))}
       ${cfKV('Actual SRT', esc(fmtDT(res.srtAtActual)))}
       ${cfKV('Last line', esc(fmtDT(res.lineAt)))}
-      ${cfSec('Result')}
-      ${cfKV('SRT compliance', '', badge(res.srtCls))}
-      ${cfKV('Quick Sail', res.qsail + ' min', badge(res.qsailCls))}
-      ${cfKV('Total Idle', res.idle + ' min', badge(res.idleCls), true)}
       ${cfSec('Remarks')}
       ${cfRem(rem)}
     </div>`,
@@ -1332,17 +1487,17 @@ async function saveDeparture(r) {
   Object.assign(r, upd);
   updateNavCounts();
   S.depSel = null;
+  delete S.depDraft[r.id];
+  saveDrafts(true);
   toast(`Departure saved · ${r.vessel_name}`, 'success');
   openDialog({
     title: 'Vessel call completed',
     html: `<div class="dlg-sum">
       <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
-      <div class="dlg-kv"><span>SRT compliance</span><b></b>${badge(upd.srt_class)}</div>
-      <div class="dlg-kv"><span>Quick Start</span><b>${r.quick_start_minutes} min</b>${badge(r.quick_start_class)}</div>
-      <div class="dlg-kv"><span>Quick Sail</span><b>${upd.quick_sail_minutes} min</b>${badge(upd.quick_sail_class)}</div>
-      <div class="dlg-kv strong"><span>Total Idle</span><b>${upd.total_idle_minutes} min</b>${badge(upd.total_idle_class)}</div>
+      <div class="dlg-kv"><span>Quick Start <em class="muted">from arrival</em></span><b>${r.quick_start_minutes} min</b>${badge(r.quick_start_class)}</div>
+      <div class="result-in-dlg">${res.html}</div>
     </div>`,
-    width: 420,
+    width: 460,
     actions: [
       { text: 'View records', action: () => { go('records'); return true; } },
       { text: 'Open dashboard', primary: true, action: () => { go('dashboard'); return true; } }
@@ -1546,16 +1701,17 @@ function openEditPrediction(r) {
   EP.dlg = dlg;
   const w = EP.w;
   w.qc = $('#e-qc').kendoDropDownList({
-    dataSource: QC_DB, dataTextField: 'qc', dataValueField: 'qc', optionLabel: 'Select crane…', filter: 'contains', size: 'medium',
+    dataSource: QC_DB, dataTextField: 'qc', dataValueField: 'qc', optionLabel: 'Select crane…', filter: 'contains', delay: 120, size: 'medium',
     value: r.qc_number || '',
     template: q => `<div class="qc-opt"><b>${esc(q.qc)}</b><span>${esc(q.model || '')} · ${esc(q.speed)} m/min</span></div>`,
     change: () => editPreview()
   }).data('kendoDropDownList');
-  w.cmph = $('#e-cmph').kendoNumericTextBox({ spinners: false, min: 1, max: 80, step: 1, decimals: 1, format: '#.#', size: 'medium', value: r.cmph != null ? +r.cmph : null,
+  typeToSearch(w.qc);
+  w.cmph = $('#e-cmph').kendoNumericTextBox({ spinners: false, selectOnFocus: true, min: 1, max: 80, step: 1, decimals: 1, format: '#.#', size: 'medium', value: r.cmph != null ? +r.cmph : null,
     suffixOptions: { template: () => 'moves/hr' }, change: () => editPreview(), spin: () => editPreview() }).data('kendoNumericTextBox');
   $('#e-cmph').on('input', () => editPreview());
   WORKLOAD.forEach(f => {
-    w[f.id] = $('#e-' + f.id).kendoNumericTextBox({ spinners: false, min: 0, step: 1, decimals: 0, format: 'n0', size: 'medium', placeholder: '0', value: r[f.id] != null ? +r[f.id] : null,
+    w[f.id] = $('#e-' + f.id).kendoNumericTextBox({ spinners: false, selectOnFocus: true, min: 0, step: 1, decimals: 0, format: 'n0', size: 'medium', placeholder: '0', value: r[f.id] != null ? +r[f.id] : null,
       suffixOptions: { template: () => f.unit }, change: () => editPreview(), spin: () => editPreview() }).data('kendoNumericTextBox');
     $('#e-' + f.id).on('input', () => editPreview());
   });
@@ -1946,7 +2102,9 @@ function downloadReport() {
 (function boot(tries) {
   if (window.jQuery && window.kendo && window.sb) {
     loadQCDatabase().then(() => {
+      const restored = S.operator && loadDrafts();
       renderRoot();
+      if (restored) toast('Unsaved entries restored from this device', 'info');
       if (S.operator) loadRecords().then(() => refreshCurrentLists());
     });
   } else if ((tries || 0) > 100) {

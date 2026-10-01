@@ -52,8 +52,22 @@ use the full date-time, and both the HH:mm columns and the `*_at` timestamp colu
 Older records without `*_at` values are placed on the date nearest their neighbouring times.
 
 ## Workflow
-Each phase ends with **Calculate …** → a confirmation popup of all details → **Amend** (close and fix) or
-**Calculate & save**. Prediction and Departure have a searchable vessel picker (type part of the name or reference).
+Each phase ends with **Calculate …** → a confirmation popup showing only the details entered → **Amend** (close and
+fix) or **Calculate & save**. Results (Quick Start, predicted last lift / SRT, SRT compliance, Quick Sail, Total Idle)
+are hidden while entering data and are shown only after the record is saved. Prediction and Departure have a searchable vessel picker (type part of the name or reference).
+
+## Fast data entry
+- Times: type `0830`, `830`, `8:30` or `08.30` — a complete 4-digit / `H:mm` time is accepted and the cursor jumps to
+  the next field automatically (numeric keypad on phones, no `:` needed). Enter also moves on.
+- Tab goes field → field only (the Now buttons and date chips are tap targets, not tab stops).
+- Vessel / QC dropdowns: focus and just start typing to search; Enter opens the list. Picking a crane jumps to CMPH.
+- Number boxes select their value on focus, so typing replaces it; Enter moves to the next box.
+- Calculate with something missing jumps to the first field that needs attention.
+- **Drafts are kept on the device.** Everything typed in Arrival, Prediction (per vessel) and Departure (per vessel)
+  is saved to the phone/PC's local storage as you type. Switching tabs, closing the browser or app, the phone killing
+  the page, a reload or a lost connection won't lose entries — reopening restores them and returns to the same screen.
+  Drafts are kept per employee ID, cleared once that record is saved, dropped if another device has already moved
+  the vessel to the next phase, and expire after 7 days. Restored times keep the dates they were typed with.
 
 ## Edit saved prediction (audit-controlled)
 Records → open a vessel → **Edit prediction**. The new last lift / SRT is recalculated from the original prediction
