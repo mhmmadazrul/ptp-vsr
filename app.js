@@ -621,6 +621,7 @@ function renderRoot() {
         </div>
       </div>
       <div class="appbar-actions">
+        <button id="help-btn" class="icon-btn" title="Guide for this screen" aria-label="Show guide for this screen"><i class="ti ti-help"></i></button>
         <button id="refresh-btn" class="icon-btn" title="Refresh data" aria-label="Refresh data"><i class="ti ti-refresh"></i></button>
         <button id="op-btn" class="op-chip" title="Switch operator"><i class="ti ti-user-circle"></i><span>${esc(S.operator)}</span><i class="ti ti-switch-horizontal op-sw"></i></button>
       </div>
@@ -644,6 +645,7 @@ function renderRoot() {
   }).data('kendoNotification');
 
   $('.tabs').on('click', '.tab', function () { go(this.getAttribute('data-view')); });
+  $('#help-btn').on('click', () => startTour(S.view));
   $('#refresh-btn').on('click', async () => { await loadRecords(); renderView(); toast('Data refreshed', 'success'); });
   $('#op-btn').on('click', () => openDialog({
     title: 'Switch operator',
@@ -655,6 +657,7 @@ function renderRoot() {
 
   updateNavCounts();
   renderView();
+  if (!store.get(tourSeenKey())) setTimeout(() => { if (!$('.k-dialog:visible').length && S.view === 'arrival') startTour('arrival'); }, 700);
 }
 
 function updateNavCounts() {
@@ -667,6 +670,7 @@ function updateNavCounts() {
 }
 
 function go(view, opts) {
+  closeTour();
   if (!VIEWS.some(v => v.id === view)) view = 'arrival';
   S.view = view;
   store.set('ptp_view', view);
@@ -2075,6 +2079,217 @@ function downloadReport() {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast(`Exported ${done.length} completed record${done.length > 1 ? 's' : ''}`, 'success');
+}
+
+// ── GUIDED TOUR (coach marks on the real screen, English / Bahasa Malaysia) ──
+// Starts by itself on an operator's first sign-in; the "?" button in the top bar replays the
+// tour for whichever tab is open. Steps whose target isn't on screen are skipped automatically.
+const TOUR_VERSION = 'v1';
+const tourSeenKey = () => 'ptp_tour_' + TOUR_VERSION + '_' + (S.operator || '_');
+let TL = store.get('ptp_tour_lang') || 'en';
+const T2 = (en, bm) => ({ en, bm });
+
+const TOURS = {
+  arrival: [
+    { center: true, icon: 'ti-ship', title: T2('Welcome to VSR', 'Selamat datang ke VSR'),
+      body: T2('Each vessel call is recorded in 3 phases: <b>Arrival</b> → <b>Prediction</b> → <b>Departure</b>. This 1-minute guide shows how. You can replay it any time with the <b>?</b> button at the top.',
+               'Setiap panggilan kapal direkod dalam 3 fasa: <b>Ketibaan</b> → <b>Ramalan</b> → <b>Berlepas</b>. Panduan 1 minit ini menunjukkan caranya. Ulang bila-bila masa dengan butang <b>?</b> di atas.') },
+    { sel: '#a-vessel', up: '.grid', title: T2('Vessel name & reference', 'Nama & rujukan kapal'),
+      body: T2('Type normally — capital letters are automatic. Press <b>Enter</b> to jump to the next box.',
+               'Taip seperti biasa — huruf besar automatik. Tekan <b>Enter</b> untuk ke kotak seterusnya.') },
+    { sel: '#a-fl', up: '.fld', demo: 'time', title: T2('Type times as 4 digits', 'Taip masa 4 digit'),
+      body: T2('Type <b>0830</b> — no colon needed. A complete time is accepted and the cursor <b>moves to the next field by itself</b>. 830 and 8:30 also work.',
+               'Taip <b>0830</b> — tak perlu titik bertindih. Masa yang lengkap diterima dan kursor <b>bergerak ke ruang seterusnya sendiri</b>. 830 dan 8:30 juga boleh.') },
+    { sel: '#a-fl-dc', title: T2('Dates fill in automatically', 'Tarikh diisi automatik'),
+      body: T2('Each time has a date. Past midnight (e.g. 23:50 → 00:10) it moves to the next day and shows <b>+1d</b>. Tap the date to change it.',
+               'Setiap masa ada tarikh. Lepas tengah malam (cth. 23:50 → 00:10) ia beralih ke hari esok dan tunjuk <b>+1d</b>. Tekan tarikh untuk menukarnya.') },
+    { sel: '.rule', title: T2('Checks while you type', 'Semakan semasa menaip'),
+      body: T2('RTW cannot be earlier than First Line. If First Lift is <b>before</b> RTW it is allowed but marked <b>ABNORMAL</b> and left out of the Quick Start and Total Idle scores — explain it in remarks.',
+               'RTW tidak boleh lebih awal daripada First Line. Jika First Lift <b>sebelum</b> RTW, ia dibenarkan tetapi ditanda <b>ABNORMAL</b> dan tidak dikira dalam skor Quick Start dan Total Idle — terangkan dalam catatan.') },
+    { sel: '#a-rem', up: '.card', title: T2('Remarks are mandatory', 'Catatan wajib diisi'),
+      body: T2('Note anything that affected the arrival — berth readiness, lashing gang, crane availability.',
+               'Catat apa-apa yang menjejaskan ketibaan — kesediaan berth, kumpulan lashing, kesediaan kren.') },
+    { sel: '#a-save', title: T2('Calculate → check → save', 'Kira → semak → simpan'),
+      body: T2('Tap <b>Calculate</b>. A popup shows what you entered: tap <b>Edit</b> to fix something, or <b>Calculate &amp; save</b>. The result (Quick Start) is shown <b>after</b> saving.',
+               'Tekan <b>Calculate</b>. Popup menunjukkan apa yang anda isi: tekan <b>Edit</b> untuk betulkan, atau <b>Calculate &amp; save</b>. Keputusan (Quick Start) dipaparkan <b>selepas</b> disimpan.') },
+    { sel: '.draft-note', alt: '#a-save', title: T2('Nothing gets lost', 'Tiada data hilang'),
+      body: T2('What you type is kept on this phone as you go. If the app closes or you switch tabs, your entries come back when you return.',
+               'Apa yang anda taip disimpan dalam telefon ini. Jika aplikasi tertutup atau anda tukar tab, data anda kembali semula.') },
+    { sel: '.tabs', title: T2('The other phases', 'Fasa-fasa lain'),
+      body: T2('The orange numbers show vessels waiting for <b>Prediction</b> or <b>Departure</b>. <b>Records</b> lists every call; <b>Dashboard</b> shows the scores. Tap <b>?</b> on each tab for its own guide.',
+               'Nombor oren menunjukkan kapal yang menunggu <b>Ramalan</b> atau <b>Berlepas</b>. <b>Records</b> menyenaraikan semua panggilan; <b>Dashboard</b> menunjukkan skor. Tekan <b>?</b> di setiap tab untuk panduannya.') }
+  ],
+  prediction: [
+    { sel: '.pick-fld', title: T2('Find the vessel', 'Cari kapal'),
+      body: T2('Type part of the vessel name or reference to search, or tap a vessel in the list below.',
+               'Taip sebahagian nama atau rujukan kapal untuk mencari, atau tekan kapal dalam senarai di bawah.') },
+    { sel: '.queue', title: T2('Vessels waiting', 'Kapal menunggu'),
+      body: T2('Every vessel with a saved arrival appears here until its prediction is saved.',
+               'Setiap kapal yang ketibaannya sudah disimpan muncul di sini sehingga ramalannya disimpan.') },
+    { sel: '.sel-strip', title: T2('Selected vessel', 'Kapal dipilih'),
+      body: T2('Check this is the right vessel. Use <b>Change vessel</b> to pick another — what you typed for each vessel is kept.',
+               'Pastikan kapal betul. Guna <b>Change vessel</b> untuk pilih yang lain — data setiap kapal disimpan.') },
+    { sel: '#p-qc', up: '.fld', title: T2('Last crane (QC)', 'Kren terakhir (QC)'),
+      body: T2('Tap the box and just type the crane number (e.g. <b>40</b>), then <b>Enter</b>. The cursor jumps to CMPH.',
+               'Tekan kotak dan taip nombor kren (cth. <b>40</b>), kemudian <b>Enter</b>. Kursor terus ke CMPH.') },
+    { sel: '.wl', title: T2('Remaining workload', 'Baki kerja'),
+      body: T2('Enter moves to the next box. Tapping a box selects its value, so typing replaces it. Leave unused types empty.',
+               'Enter bergerak ke kotak seterusnya. Tekan kotak akan memilih nilainya, jadi taip terus menggantikannya. Biarkan kosong jika tiada.') },
+    { sel: '#p-save', title: T2('Calculate → check → save', 'Kira → semak → simpan'),
+      body: T2('The predicted last lift and recommended <b>SRT</b> are calculated from the moment you tap <b>Calculate &amp; save</b>. Call the pilot for the SRT shown.',
+               'Ramalan last lift dan <b>SRT</b> disyorkan dikira dari saat anda tekan <b>Calculate &amp; save</b>. Panggil pilot untuk SRT yang dipaparkan.') },
+    { center: true, icon: 'ti-hand-click', title: T2('Pick a vessel to continue', 'Pilih kapal untuk teruskan'),
+      body: T2('Select a vessel, then tap <b>?</b> again to see the crane, workload and calculate steps.',
+               'Pilih kapal, kemudian tekan <b>?</b> sekali lagi untuk melihat langkah kren, beban kerja dan pengiraan.'), onlyIf: () => !document.getElementById('p-qc') }
+  ],
+  departure: [
+    { sel: '.pick-fld', title: T2('Find the vessel', 'Cari kapal'),
+      body: T2('Vessels with a saved prediction appear here. Type to search or tap one in the list.',
+               'Kapal yang ramalannya sudah disimpan muncul di sini. Taip untuk mencari atau tekan dalam senarai.') },
+    { sel: '.queue', title: T2('Vessels waiting', 'Kapal menunggu'),
+      body: T2('Each card shows the recommended SRT and crane. Tap one to record its departure.',
+               'Setiap kad menunjukkan SRT disyorkan dan kren. Tekan untuk merekod berlepasnya.') },
+    { sel: '.sel-kpis', title: T2('SRT and the GOOD window', 'SRT dan tetingkap GOOD'),
+      body: T2('SRT is <b>GOOD</b> when the actual last lift lands within 15 minutes before the SRT, up to the SRT itself.',
+               'SRT <b>GOOD</b> jika last lift sebenar berlaku dalam 15 minit sebelum SRT, sehingga SRT itu sendiri.') },
+    { sel: '#d-ll', up: '.grid', demo: 'time', title: T2('Four departure times', 'Empat masa berlepas'),
+      body: T2('Actual last lift, pilot onboard, actual SRT and last line. Type 4 digits each — the cursor moves on by itself. Dates fill in automatically.',
+               'Last lift sebenar, pilot naik, SRT sebenar dan last line. Taip 4 digit setiap satu — kursor bergerak sendiri. Tarikh diisi automatik.') },
+    { sel: '#d-rem', up: '.card', title: T2('Remarks are mandatory', 'Catatan wajib diisi'),
+      body: T2('What happened — delays, breakdowns, early completion, pilot late.',
+               'Apa yang berlaku — kelewatan, kerosakan, siap awal, pilot lewat.') },
+    { sel: '#d-save', title: T2('Calculate → check → save', 'Kira → semak → simpan'),
+      body: T2('After saving you see SRT compliance, Quick Sail (≤ 17 min) and Total Idle (≤ 37 min). The vessel call is then complete.',
+               'Selepas disimpan anda lihat pematuhan SRT, Quick Sail (≤ 17 min) dan Total Idle (≤ 37 min). Panggilan kapal kemudian lengkap.') },
+    { center: true, icon: 'ti-hand-click', title: T2('Pick a vessel to continue', 'Pilih kapal untuk teruskan'),
+      body: T2('Select a vessel, then tap <b>?</b> again to see the time entry steps.',
+               'Pilih kapal, kemudian tekan <b>?</b> sekali lagi untuk melihat langkah memasukkan masa.'), onlyIf: () => !document.getElementById('d-ll') }
+  ],
+  records: [
+    { sel: '.rec-search', title: T2('Search records', 'Cari rekod'),
+      body: T2('Search by vessel, reference, employee ID or crane.', 'Cari mengikut kapal, rujukan, ID pekerja atau kren.') },
+    { sel: '#r-filter', title: T2('Filter by phase', 'Tapis mengikut fasa'),
+      body: T2('<b>Predict</b> and <b>Depart</b> show calls still waiting; <b>Done</b> shows completed calls.',
+               '<b>Predict</b> dan <b>Depart</b> menunjukkan panggilan yang masih menunggu; <b>Done</b> menunjukkan yang telah lengkap.') },
+    { sel: '.rec-row', title: T2('Open a vessel call', 'Buka panggilan kapal'),
+      body: T2('Tap a row for full details. A saved prediction can be corrected with <b>Edit prediction</b> — a reason is required and every change is kept in the <b>Audit trail</b>.',
+               'Tekan baris untuk butiran penuh. Ramalan yang disimpan boleh dibetulkan dengan <b>Edit prediction</b> — sebab wajib diberi dan setiap perubahan disimpan dalam <b>Audit trail</b>.') }
+  ],
+  dashboard: [
+    { sel: '.dash-tools', title: T2('Choose the period', 'Pilih tempoh'),
+      body: T2('Filter by month or workweek. <b>Export CSV</b> downloads every completed record for that period.',
+               'Tapis mengikut bulan atau minggu kerja. <b>Export CSV</b> memuat turun semua rekod lengkap bagi tempoh itu.') },
+    { sel: '.donuts', title: T2('Scores against target', 'Skor berbanding sasaran'),
+      body: T2('Each ring shows the % GOOD; the target is 80%. Abnormal Quick Starts are left out of the Quick Start and Total Idle scores.',
+               'Setiap cincin menunjukkan % GOOD; sasaran 80%. Quick Start ABNORMAL tidak dikira dalam skor Quick Start dan Total Idle.') },
+    { sel: '.dash-table', title: T2('Recent completed calls', 'Panggilan lengkap terkini'),
+      body: T2('Tap a row to open that vessel call.', 'Tekan baris untuk membuka panggilan kapal tersebut.') }
+  ]
+};
+
+let TOUR = null;   // { view, steps, i }
+
+function startTour(view) {
+  const all = (TOURS[view] || []).filter(s => !s.onlyIf || s.onlyIf());
+  const steps = all.filter(s => s.center || document.querySelector(s.sel) || (s.alt && document.querySelector(s.alt)));
+  if (!steps.length) return;
+  closeTour();
+  TOUR = { view, steps, i: 0 };
+  $('body').append(`<div class="tour-block" id="tour-block"></div><div class="tour-spot" id="tour-spot"></div>
+    <div class="tour-card" id="tour-card" role="dialog" aria-modal="true" aria-live="polite"></div>`);
+  $('#tour-block').on('click', e => e.stopPropagation());
+  $(document).on('keydown.tour', e => { if (e.key === 'Escape') closeTour(true); else if (e.key === 'ArrowRight') tourGo(1); else if (e.key === 'ArrowLeft') tourGo(-1); });
+  $(window).on('resize.tour scroll.tour', () => placeTour());
+  showTourStep();
+}
+function closeTour(done) {
+  if (!TOUR && !$('#tour-card').length) return;
+  clearInterval(showTourStep._demo);
+  $('#tour-block, #tour-spot, #tour-card').remove();
+  $(document).off('keydown.tour'); $(window).off('resize.tour scroll.tour');
+  if (done && S.operator) store.set(tourSeenKey(), '1');
+  TOUR = null;
+}
+function tourGo(d) {
+  if (!TOUR) return;
+  const n = TOUR.i + d;
+  if (n < 0) return;
+  if (n >= TOUR.steps.length) return closeTour(true);
+  TOUR.i = n; showTourStep();
+}
+function tourTarget(s) {
+  if (s.center) return null;
+  let el = document.querySelector(s.sel) || (s.alt && document.querySelector(s.alt));
+  if (!el) return null;
+  // Kendo hides the original input: highlight the widget (or a chosen ancestor) instead
+  const wrap = el.closest('.k-timepicker, .k-dropdownlist, .k-numerictextbox, .k-textbox, .k-textarea');
+  if (wrap) el = wrap;
+  if (s.up && el.closest(s.up)) el = el.closest(s.up);
+  return el;
+}
+function showTourStep() {
+  const s = TOUR.steps[TOUR.i];
+  const el = tourTarget(s);
+  clearInterval(showTourStep._demo);
+  const n = TOUR.steps.length, i = TOUR.i;
+  $('#tour-card').toggleClass('center', !el).html(`
+    <div class="tc-top">
+      <span class="tc-count">${i + 1} / ${n}</span>
+      <div class="tc-lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en" class="${TL === 'en' ? 'on' : ''}">EN</button><button type="button" data-lang="bm" class="${TL === 'bm' ? 'on' : ''}">BM</button>
+      </div>
+      <button type="button" class="tc-x" aria-label="Close guide" data-tour="skip"><i class="ti ti-x"></i></button>
+    </div>
+    ${s.icon ? `<div class="tc-ic"><i class="ti ${s.icon}"></i></div>` : ''}
+    <div class="tc-t">${s.title[TL]}</div>
+    <div class="tc-b">${s.body[TL]}</div>
+    ${s.demo === 'time' ? `<div class="tc-demo" aria-hidden="true"><div class="td-f"><span class="td-l">First line</span><span class="td-v" id="td-1"></span></div><i class="ti ti-arrow-right"></i><div class="td-f"><span class="td-l">RTW</span><span class="td-v" id="td-2"></span></div></div>` : ''}
+    <div class="tc-dots">${TOUR.steps.map((_, k) => `<span class="${k === i ? 'on' : ''}"></span>`).join('')}</div>
+    <div class="tc-act">
+      ${i > 0 ? `<button type="button" class="tc-btn ghost" data-tour="back">${TL === 'bm' ? 'Kembali' : 'Back'}</button>` : `<button type="button" class="tc-btn ghost" data-tour="skip">${TL === 'bm' ? 'Langkau' : 'Skip'}</button>`}
+      <button type="button" class="tc-btn" data-tour="next">${i === n - 1 ? (TL === 'bm' ? 'Selesai' : 'Done') : (TL === 'bm' ? 'Seterusnya' : 'Next')}</button>
+    </div>`);
+  $('#tour-card [data-tour="next"]').on('click', () => tourGo(1));
+  $('#tour-card [data-tour="back"]').on('click', () => tourGo(-1));
+  $('#tour-card [data-tour="skip"]').on('click', () => closeTour(true));
+  $('#tour-card [data-lang]').on('click', function () { TL = this.getAttribute('data-lang'); store.set('ptp_tour_lang', TL); showTourStep(); });
+  if (s.demo === 'time') {
+    // little looping demo: 0 → 08 → 083 → 08:30, cursor jumps to RTW, 0 → 08 → 084 → 08:45
+    const seq = [['0', ''], ['08', ''], ['083', ''], ['08:30', '|'], ['08:30', '0'], ['08:30', '08'], ['08:30', '084'], ['08:30', '08:45'], ['08:30', '08:45'], ['', '']];
+    let k = 0;
+    const tick = () => { const [a, b] = seq[k++ % seq.length]; $('#td-1').text(a).toggleClass('act', a.length < 5); $('#td-2').text(b === '|' ? '' : b).toggleClass('act', a.length === 5 && b.length < 5); };
+    tick(); showTourStep._demo = setInterval(tick, 550);
+  }
+  if (el) {
+    const r0 = el.getBoundingClientRect();
+    const mobile = window.matchMedia('(max-width: 760px)').matches;
+    const inFixedBar = !!el.closest('.tabs') && mobile;
+    if (!inFixedBar && (r0.top < 70 || r0.bottom > window.innerHeight - (mobile ? 260 : 120))) {
+      el.scrollIntoView({ block: 'center', behavior: 'instant' in document.documentElement.style ? 'instant' : 'auto' });
+    }
+  }
+  placeTour();
+  $('#tour-card .tc-btn:last').trigger('focus');
+}
+function placeTour() {
+  if (!TOUR) return;
+  const s = TOUR.steps[TOUR.i];
+  const el = tourTarget(s);
+  const spot = $('#tour-spot'), card = $('#tour-card');
+  const vw = document.documentElement.clientWidth, vh = window.innerHeight;
+  if (!el) { spot.addClass('none').css({ top: vh / 2, left: vw / 2, width: 0, height: 0 }); card.css({ top: '', left: '', bottom: '' }); return; }
+  const r = el.getBoundingClientRect(), pad = 6;
+  spot.removeClass('none').css({ top: r.top - pad, left: r.left - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+  const mobile = window.matchMedia('(max-width: 760px)').matches;
+  if (mobile) {   // bottom sheet, or top sheet when the target sits low (e.g. the bottom tab bar)
+    const low = r.top > vh * 0.55;
+    card.css(low ? { top: 12, bottom: 'auto', left: 12 } : { top: 'auto', bottom: 12, left: 12 });
+    return;
+  }
+  const cw = card.outerWidth(), ch = card.outerHeight(), gap = 14;
+  let top = r.bottom + gap; if (top + ch > vh - 10) top = Math.max(10, r.top - ch - gap);
+  let left = Math.min(Math.max(10, r.left), vw - cw - 10);
+  card.css({ top, left, bottom: 'auto' });
 }
 
 // ── BOOT ──────────────────────────────────────────────────

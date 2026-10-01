@@ -58,6 +58,12 @@ Each phase ends with **Calculate …** → a confirmation popup showing only the
 fix) or **Calculate & save**. Results (Quick Start, predicted last lift / SRT, SRT compliance, Quick Sail, Total Idle)
 are hidden while entering data and are shown only after the record is saved. Prediction and Departure have a searchable vessel picker (type part of the name or reference).
 
+## User guide
+- **Guided tour (EN / BM):** starts by itself the first time each employee ID signs in, and the **?** button in the
+  top bar replays the guide for whichever tab is open. It highlights the real fields on screen (with a small animated
+  demo of 4-digit time entry). Steps for things not on screen yet are skipped. To show it to everyone again after a big
+  change, bump `TOUR_VERSION` in `app.js`.
+
 ## Fast data entry
 - Times: type `0830`, `830`, `8:30` or `08.30` — a complete 4-digit / `H:mm` time is accepted and the cursor jumps to
   the next field automatically (numeric keypad on phones, no `:` needed). Enter also moves on.
