@@ -148,12 +148,13 @@ function phasePill(r) {
 }
 
 /** Opens a Kendo Dialog. actions: [{text, primary, action():bool|void}] */
-function openDialog({ title, html, actions, width }) {
-  const $d = $('<div class="vsr-dialog"></div>').appendTo(document.body);
+function openDialog({ title, html, actions, width, maxHeight, cls }) {
+  const $d = $(`<div class="vsr-dialog ${cls || ''}"></div>`).appendTo(document.body);
   const dlg = $d.kendoDialog({
     title: title || false,
     content: html,
     width: (width || 520) + 'px',
+    maxHeight: maxHeight || Math.round(window.innerHeight * 0.9),
     modal: true,
     closable: true,
     visible: false,
@@ -169,6 +170,41 @@ function openDialog({ title, html, actions, width }) {
 
 function kButton(sel, opts) {
   return $(sel).kendoButton(Object.assign({ size: 'large' }, opts || {})).data('kendoButton');
+}
+
+/** Forces upper-case while typing without jumping the caret */
+function upperInput(el) {
+  const s = el.selectionStart, e = el.selectionEnd, u = el.value.toUpperCase();
+  if (u !== el.value) { el.value = u; try { el.setSelectionRange(s, e); } catch (x) {} }
+  return u;
+}
+
+/** Run fn after a dropdown popup has finished closing (safe to re-render / destroy it then) */
+function afterPopup(w, fn) {
+  const pop = w && w.popup;
+  if (pop && pop.visible()) pop.one('deactivate', () => setTimeout(fn, 0));
+  else setTimeout(fn, 0);
+}
+
+/** Confirmation dialog building blocks */
+const cfKV = (k, v, extra, strong) => `<div class="dlg-kv${strong ? ' strong' : ''}"><span>${k}</span>${v === '' ? '' : `<b>${v == null ? '—' : v}</b>`}${extra || ''}</div>`;
+const cfSec = t => `<div class="cf-sec">${t}</div>`;
+const cfRem = t => t ? `<div class="d-rem"><i class="ti ti-message-2"></i>${esc(t)}</div>` : '<div class="d-rem muted"><i class="ti ti-message-2"></i>No remarks</div>';
+const cfLead = '<p class="dlg-p muted">Check the details below. Tap <b>Amend</b> to go back and correct anything.</p>';
+
+/** Searchable vessel picker (Kendo DropDownList with filter) used by Prediction and Departure */
+function vesselPicker(sel, list, metaFn, onPick) {
+  const w = $(sel).kendoDropDownList({
+    dataSource: list.map(r => ({ id: r.id, text: r.vessel_name + ' · ' + r.vessel_reference, vessel: r.vessel_name, ref: r.vessel_reference, meta: metaFn(r) })),
+    dataTextField: 'text', dataValueField: 'id',
+    optionLabel: 'Search or select vessel…',
+    filter: 'contains', size: 'large', height: 340,
+    template: d => `<div class="qc-opt"><b>${esc(d.vessel)} <span class="muted">· ${esc(d.ref)}</span></b><span>${esc(d.meta)}</span></div>`,
+    noDataTemplate: () => '<div class="muted" style="padding:12px">No vessel matches your search</div>',
+    change() { const v = this.value(); if (v) afterPopup(this, () => onPick(v)); }
+  }).data('kendoDropDownList');
+  if (w.filterInput) w.filterInput.attr('placeholder', 'Type vessel name or reference…');
+  return w;
 }
 
 function setBusy(btn, busy, label) {
@@ -490,15 +526,15 @@ function renderArrival(v) {
 
     <aside class="col-side">
       <section class="card result sticky" id="arr-result"></section>
-      <button id="a-save" class="save-btn"><i class="ti ti-device-floppy"></i>&nbsp;Save arrival</button>
+      <button id="a-save" class="save-btn"><i class="ti ti-calculator"></i>&nbsp;Calculate arrival</button>
       <button id="a-clear" class="link-btn" type="button"><i class="ti ti-eraser"></i> Clear form</button>
     </aside>
   </div>`);
 
   W.vessel = $('#a-vessel').kendoTextBox({ placeholder: 'e.g. EVER GIVEN', size: 'large', value: d.vessel }).data('kendoTextBox');
-  $('#a-vessel').css('text-transform', 'uppercase').on('input', function () { S.arrDraft.vessel = this.value.toUpperCase(); setMsg('a-vessel', ''); });
+  $('#a-vessel').css('text-transform', 'uppercase').on('input', function () { S.arrDraft.vessel = upperInput(this); setMsg('a-vessel', ''); });
   W.ref = $('#a-ref').kendoTextBox({ placeholder: 'e.g. VOY-2026-001', size: 'large', value: d.reference }).data('kendoTextBox');
-  $('#a-ref').on('input', function () { S.arrDraft.reference = this.value; setMsg('a-ref', ''); });
+  $('#a-ref').css('text-transform', 'uppercase').on('input', function () { S.arrDraft.reference = upperInput(this); setMsg('a-ref', ''); });
 
   const onT = () => evalArrival();
   W.fl = initTimePicker('a-fl', d.fl, onT);
@@ -510,7 +546,7 @@ function renderArrival(v) {
   $('#a-rem').on('input', function () { S.arrDraft.remarks = this.value; setMsg('a-rem', ''); });
 
   W.save = kButton('#a-save', { themeColor: 'primary' });
-  W.save.bind('click', saveArrival);
+  W.save.bind('click', confirmArrival);
   $('#a-clear').on('click', () => { S.arrDraft = { vessel: '', reference: '', fl: null, rtw: null, fli: null, remarks: '' }; renderView(); });
 
   evalArrival();
@@ -585,9 +621,10 @@ function gauge(val, target) {
 const tlStep = (label, t) => `<div class="tl-step"><span class="tl-dot"></span><span class="tl-l">${label}</span><span class="tl-t">${t}</span></div>`;
 const tlGap = (m, cls) => `<div class="tl-gap ${cls ? (cls === 'GOOD' ? 'good' : 'bad') : ''}">${m} min</div>`;
 
-async function saveArrival() {
+/** Validate, then show the confirmation popup (Amend / Calculate & save) */
+function confirmArrival() {
   const vessel = String(W.vessel.value() || '').trim().toUpperCase();
-  const ref = String(W.ref.value() || '').trim();
+  const ref = String(W.ref.value() || '').trim().toUpperCase();
   const rem = String(W.rem.value() || '').trim();
   const r = evalArrival();
   const errs = [];
@@ -600,17 +637,30 @@ async function saveArrival() {
   if (!rem) { setMsg('a-rem', 'Remarks are mandatory', 'error'); errs.push('remarks'); }
   if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); return; }
 
-  const dup = S.records.find(x => phaseOf(x) !== 'completed' && x.vessel_name === vessel && x.vessel_reference === ref);
-  if (dup && !saveArrival._confirmed) {
-    openDialog({
-      title: 'Possible duplicate',
-      html: `<p class="dlg-p"><b>${esc(vessel)} · ${esc(ref)}</b> already has an open record (${esc(PHASES[phaseOf(dup)].label.toLowerCase())}, created ${esc(relTime(dup.created_at))}).</p><p class="dlg-p">Save another arrival anyway?</p>`,
-      width: 420,
-      actions: [{ text: 'Cancel' }, { text: 'Save anyway', primary: true, action: () => { saveArrival._confirmed = true; saveArrival().finally(() => { saveArrival._confirmed = false; }); return true; } }]
-    });
-    return;
-  }
+  const dup = S.records.find(x => phaseOf(x) !== 'completed' && x.vessel_name === vessel && String(x.vessel_reference || '').toUpperCase() === ref);
+  openDialog({
+    title: 'Confirm arrival details',
+    width: 460,
+    html: `<div class="dlg-sum">
+      ${cfLead}
+      <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(vessel)} <span>· ${esc(ref)}</span></div>
+      ${dup ? `<div class="cf-warn"><i class="ti ti-alert-triangle"></i><div><b>Possible duplicate</b> — this vessel already has an open record (${esc(PHASES[phaseOf(dup)].label.toLowerCase())}, created ${esc(relTime(dup.created_at))}).</div></div>` : ''}
+      ${cfSec('Arrival times')}
+      ${cfKV('First line', esc(r.fl))}
+      ${cfKV('Vessel secured (RTW)', esc(r.rtw))}
+      ${cfKV('First lift', esc(r.fli))}
+      ${cfKV('Quick Start', r.qs + ' min', badge(r.cls), true)}
+      ${cfSec('Remarks')}
+      ${cfRem(rem)}
+    </div>`,
+    actions: [
+      { text: 'Amend' },
+      { text: 'Calculate & save', primary: true, action: () => { saveArrival({ vessel, ref, rem, r }); return true; } }
+    ]
+  });
+}
 
+async function saveArrival({ vessel, ref, rem, r }) {
   const rec = {
     id: genId(),
     vessel_name: vessel,
@@ -693,9 +743,16 @@ function renderPrediction(v) {
   if (!S.predSel) {
     v.html(stepper('prediction') + `<section class="card">
       <h2 class="card-t"><i class="ti ti-list"></i>Select vessel <span class="card-hint">${pending.length} awaiting prediction</span></h2>
+      <div class="fld pick-fld">
+        <label class="k-label fld-label" for="p-pick">Search vessel</label>
+        <input id="p-pick" />
+        <div class="fld-msg">Type part of the vessel name or reference, or tap a vessel below.</div>
+      </div>
       ${queueHTML(pending, null, 'pred')}
     </section>`);
-    v.on('click', '.q-item', function () { S.predSel = this.getAttribute('data-id'); S.predDraft = { qc: '', cmph: null, f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 0, f8: 0, remarks: '' }; renderView(); });
+    const pick = id => { S.predSel = id; S.predDraft = { qc: '', cmph: null, f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 0, f8: 0, remarks: '' }; renderView(); };
+    W.pick = vesselPicker('#p-pick', pending, r => `QS ${r.quick_start_minutes} min · arrived ${relTime(r.created_at)}`, pick);
+    v.on('click', '.q-item', function () { pick(this.getAttribute('data-id')); });
     return;
   }
 
@@ -740,7 +797,7 @@ function renderPrediction(v) {
     </div>
     <aside class="col-side">
       <section class="card result sticky" id="pred-result"></section>
-      <button id="p-save" class="save-btn"><i class="ti ti-device-floppy"></i>&nbsp;Save prediction</button>
+      <button id="p-save" class="save-btn"><i class="ti ti-calculator"></i>&nbsp;Calculate prediction</button>
     </aside>
   </div>`);
 
@@ -783,7 +840,7 @@ function renderPrediction(v) {
   $('#p-rem').on('input', function () { S.predDraft.remarks = this.value; });
 
   W.save = kButton('#p-save', { themeColor: 'primary' });
-  W.save.bind('click', savePrediction);
+  W.save.bind('click', confirmPrediction);
 
   evalPrediction();
   clockTimer = setInterval(evalPrediction, 30000);
@@ -848,12 +905,45 @@ function evalPrediction() {
   return { res, ll, srt, qc, speed };
 }
 
-async function savePrediction() {
+/** Validate, then show the confirmation popup (Amend / Calculate & save) */
+function confirmPrediction() {
   const d = S.predDraft;
   const errs = [];
   if (!d.qc) { setMsg('p-qc', 'Select the last crane', 'error'); errs.push('crane'); }
   if (!(readNum(W.cmph) > 0)) { setMsg('p-cmph', 'CMPH is required', 'error'); errs.push('CMPH'); }
   if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); return; }
+  const p = evalPrediction();
+  if (!p) { toast('Enter the remaining workload before saving.', 'warning'); return; }
+  const r = S.records.find(x => x.id === S.predSel);
+  const rem = String(W.rem.value() || '').trim();
+  const base = 60 / d.cmph;
+  const wl = WORKLOAD.filter(f => +d[f.id] > 0).map(f => cfKV(f.label,
+    `${d[f.id]} ${f.unit.toLowerCase()}` + (f.factor ? ` · ${(d[f.id] * base * f.factor).toFixed(1)} min` : f.id === 'f7' ? ` · ${(d.f7 * GANTRY_M_PER_BAY / p.speed).toFixed(1)} min` : ''))).join('');
+  openDialog({
+    title: 'Confirm prediction details',
+    width: 480,
+    html: `<div class="dlg-sum">
+      ${cfLead}
+      <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
+      ${cfSec('Crane setup')}
+      ${cfKV('Last crane (QC)', esc(d.qc), `<span class="muted sm">${esc(p.qc ? p.qc.model : 'default')} · ${esc(p.speed)} m/min</span>`)}
+      ${cfKV('CMPH', esc(d.cmph), `<span class="muted sm">${base.toFixed(2)} min/move</span>`)}
+      ${cfSec('Remaining workload')}
+      ${wl}
+      ${cfKV('Total operation time', p.res.totalMin.toFixed(1) + ' min', '', true)}
+      ${cfSec('Remarks')}
+      ${cfRem(rem)}
+      <div class="cf-note"><i class="ti ti-clock"></i><div>Predicted last lift = the moment you tap <b>Calculate &amp; save</b> + total operation time (≈ <b>${toHM(p.ll)}</b>, SRT <b>${toHM(p.srt)}</b> if saved now).</div></div>
+    </div>`,
+    actions: [
+      { text: 'Amend' },
+      { text: 'Calculate & save', primary: true, action: () => { savePrediction(); return true; } }
+    ]
+  });
+}
+
+async function savePrediction() {
+  const d = S.predDraft;
   const p = evalPrediction();          // recomputed against the clock right now
   if (!p) { toast('Enter the remaining workload before saving.', 'warning'); return; }
   const rem = String(W.rem.value() || '').trim();
@@ -905,9 +995,16 @@ function renderDeparture(v) {
   if (!S.depSel) {
     v.html(stepper('departure') + `<section class="card">
       <h2 class="card-t"><i class="ti ti-list"></i>Select vessel <span class="card-hint">${ready.length} awaiting departure</span></h2>
+      <div class="fld pick-fld">
+        <label class="k-label fld-label" for="d-pick">Search vessel</label>
+        <input id="d-pick" />
+        <div class="fld-msg">Type part of the vessel name or reference, or tap a vessel below.</div>
+      </div>
       ${queueHTML(ready, null, 'dep')}
     </section>`);
-    v.on('click', '.q-item', function () { S.depSel = this.getAttribute('data-id'); renderView(); });
+    const pick = id => { S.depSel = id; renderView(); };
+    W.pick = vesselPicker('#d-pick', ready, r => `SRT ${r.suggested_srt} · QC ${r.qc_number || '—'} · pred. LL ${r.predicted_last_lift_time}`, pick);
+    v.on('click', '.q-item', function () { pick(this.getAttribute('data-id')); });
     return;
   }
 
@@ -939,7 +1036,7 @@ function renderDeparture(v) {
     </div>
     <aside class="col-side">
       <section class="card result sticky" id="dep-result"></section>
-      <button id="d-save" class="save-btn"><i class="ti ti-device-floppy"></i>&nbsp;Save departure</button>
+      <button id="d-save" class="save-btn"><i class="ti ti-calculator"></i>&nbsp;Calculate departure</button>
     </aside>
   </div>`);
 
@@ -953,7 +1050,7 @@ function renderDeparture(v) {
   W.rem = $('#d-rem').kendoTextArea({ rows: 3, maxLength: 500, placeholder: 'What happened — delays, breakdowns, early completion, pilot late…', size: 'large', resize: 'vertical' }).data('kendoTextArea');
   $('#d-rem').on('input', () => setMsg('d-rem', ''));
   W.save = kButton('#d-save', { themeColor: 'primary' });
-  W.save.bind('click', () => saveDeparture(r));
+  W.save.bind('click', () => confirmDeparture(r));
   evalDeparture(r);
 }
 
@@ -1035,7 +1132,8 @@ function srtWindowViz(srt, ll) {
   </div>`;
 }
 
-async function saveDeparture(r) {
+/** Validate, then show the confirmation popup (Amend / Calculate & save) */
+function confirmDeparture(r) {
   const res = evalDeparture(r);
   const rem = String(W.rem.value() || '').trim();
   const errs = [];
@@ -1045,6 +1143,38 @@ async function saveDeparture(r) {
   }
   if (!rem) { setMsg('d-rem', 'Remarks are mandatory', 'error'); errs.push('remarks'); }
   if (errs.length) { toast('Please complete: ' + errs.join(', '), 'warning'); return; }
+  openDialog({
+    title: 'Confirm departure details',
+    width: 480,
+    html: `<div class="dlg-sum">
+      ${cfLead}
+      <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
+      ${cfSec('Prediction')}
+      ${cfKV('Predicted last lift', esc(r.predicted_last_lift_time))}
+      ${cfKV('Recommended SRT', esc(r.suggested_srt), `<span class="muted sm">GOOD ${esc(res.winStart)}–${esc(r.suggested_srt)}</span>`)}
+      ${cfSec('Actual departure times')}
+      ${cfKV('Actual last lift', esc(res.ll), `<span class="muted sm">${res.dev > 0 ? '+' : ''}${res.dev} min vs pred.</span>`)}
+      ${cfKV('Pilot onboard', esc(res.po))}
+      ${cfKV('Actual SRT', esc(res.srt))}
+      ${cfKV('Last line', esc(res.line))}
+      ${cfSec('Result')}
+      ${cfKV('SRT compliance', '', badge(res.srtCls))}
+      ${cfKV('Quick Sail', res.qsail + ' min', badge(res.qsailCls))}
+      ${cfKV('Total Idle', res.idle + ' min', badge(res.idleCls), true)}
+      ${cfSec('Remarks')}
+      ${cfRem(rem)}
+    </div>`,
+    actions: [
+      { text: 'Amend' },
+      { text: 'Calculate & save', primary: true, action: () => { saveDeparture(r); return true; } }
+    ]
+  });
+}
+
+async function saveDeparture(r) {
+  const res = evalDeparture(r);
+  const rem = String(W.rem.value() || '').trim();
+  if (!res || !rem) { toast('Please complete all times and remarks.', 'warning'); return; }
 
   const upd = {
     actual_last_lift_time: res.ll, actual_pilot_onboard_time: res.po, actual_srt_time: res.srt,
@@ -1155,7 +1285,7 @@ function recordRow(r) {
       <div class="rec-meta"><i class="ti ti-calendar"></i>${esc(fmtDateTime(r.created_at))}<i class="ti ti-user"></i>${esc(r.operator_id)}</div>
       <div class="rec-chips">${chips.join('')}</div>
     </div>
-    <div class="rec-side">${phasePill(r)}${ph === 'completed' ? `<span class="rec-srt">${badge(r.srt_class, 'SRT ' + (r.srt_class === 'GOOD' ? 'GOOD' : 'NQ'))}</span>` : ''}<i class="ti ti-chevron-right rec-chev"></i></div>
+    <div class="rec-side">${r.prediction_edited ? `<span class="pill pill-edit" title="Prediction edited ${esc(r.prediction_edit_count || 1)}×"><i class="ti ti-pencil"></i>Edited</span>` : ''}${phasePill(r)}${ph === 'completed' ? `<span class="rec-srt">${badge(r.srt_class, 'SRT ' + (r.srt_class === 'GOOD' ? 'GOOD' : 'NQ'))}</span>` : ''}<i class="ti ti-chevron-right rec-chev"></i></div>
   </div>`;
 }
 const miniChip = (k, v, cls) => `<span class="mchip ${cls === 'GOOD' ? 'good' : 'bad'}"><em>${k}</em>${esc(v)}m</span>`;
@@ -1172,11 +1302,12 @@ function openRecord(r) {
       ${remark(r.arrival_remarks)}
     </div>`;
   if (r.predicted_last_lift_time) {
-    html += `<div class="d-sec"><div class="d-sec-t"><span class="dot">2</span>Departure prediction <em>by ${esc(r.prediction_operator || '—')}</em></div>
+    html += `<div class="d-sec"><div class="d-sec-t"><span class="dot">2</span>Departure prediction ${r.prediction_edited ? `<span class="pill pill-edit"><i class="ti ti-pencil"></i>Edited ×${esc(r.prediction_edit_count || 1)}</span>` : ''}<em>by ${esc(r.prediction_operator || '—')}</em></div>
       ${row('QC · model', `${r.qc_number} · ${r.qc_model || '—'}`)}${row('CMPH', r.cmph)}
       ${row('Total operation time', (+r.total_min).toFixed(1) + ' min')}
       ${row('Predicted last lift', r.predicted_last_lift_time)}${row('Recommended SRT', r.suggested_srt)}
       ${remark(r.prediction_remarks)}
+      ${r.prediction_edited ? `<div class="audit-note"><i class="ti ti-history"></i><div>Edited <b>${esc(r.prediction_edit_count || 1)}×</b> · last by <b>${esc(r.prediction_last_edited_by || '—')}</b>${r.prediction_last_edited_at ? ' · ' + esc(fmtDateTime(r.prediction_last_edited_at)) : ''}${r.prediction_edit_reason ? `<br>Reason: ${esc(r.prediction_edit_reason)}` : ''}</div></div>` : ''}
     </div>`;
   }
   if (r.actual_last_lift_time) {
@@ -1192,9 +1323,232 @@ function openRecord(r) {
   }
   html += '</div>';
   const actions = [{ text: 'Close' }];
+  if (r.prediction_edited) actions.push({ text: 'Audit trail', action: () => { openAuditTrail(r); return true; } });
+  if (r.predicted_last_lift_time) actions.push({ text: 'Edit prediction', action: () => { openEditPrediction(r); return true; } });
   if (ph === 'arrival') actions.push({ text: 'Continue to prediction', primary: true, action: () => { go('prediction', { predSel: r.id }); return true; } });
   if (ph === 'prediction') actions.push({ text: 'Continue to departure', primary: true, action: () => { go('departure', { depSel: r.id }); return true; } });
   openDialog({ title: 'Vessel call', html, actions, width: 560 });
+}
+
+// ── EDIT SAVED PREDICTION (audit-controlled) ──────────────
+// The database trigger (migration_prediction_audit.sql) does the audit work: it refuses an
+// edit without a fresh reason + editor ID, marks the record as edited, bumps the edit count
+// and writes old → new values to vsr_audit_log in the same transaction.
+const AUDIT_LABELS = {
+  qc_number: 'QC number', qc_model: 'QC model', qc_speed: 'QC speed (m/min)', cmph: 'CMPH',
+  f1: 'Normal container', f2: 'Twin lift', f3: 'Gearbox', f4: 'Hatch cover', f5: 'OOG', f6: 'Open top',
+  f7: 'Gantry movement (bay)', f8: 'Breakdown (min)',
+  container_min: 'Container work (min)', gantry_min: 'Gantry travel (min)', buffer_min: 'Breakdown buffer (min)', total_min: 'Total operation time (min)',
+  predicted_last_lift_time: 'Predicted last lift', suggested_srt: 'Recommended SRT',
+  predicted_last_lift_at: 'Predicted last lift (date-time)', suggested_srt_at: 'Recommended SRT (date-time)',
+  prediction_remarks: 'Prediction remarks',
+  srt_window_start: 'SRT window start', srt_window_end: 'SRT window end', srt_class: 'SRT result', deviation_minutes: 'LL deviation (min)'
+};
+const DIFF_SHOW = ['qc_number', 'cmph', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'total_min', 'predicted_last_lift_time', 'suggested_srt', 'prediction_remarks', 'srt_class', 'deviation_minutes'];
+
+function auditVal(k, v) {
+  if (v === null || v === undefined || v === '') return '—';
+  if (/_at$/.test(k)) return fmtDateTime(v);
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(1);
+  return String(v);
+}
+function sameVal(a, b) {
+  const empty = x => x === null || x === undefined || x === '';
+  if (empty(a) && empty(b)) return true;
+  if (empty(a) || empty(b)) return false;
+  if (typeof a !== 'boolean' && !isNaN(+a) && !isNaN(+b) && !/:/.test(String(a))) return Math.abs(+a - +b) < 1e-6;
+  if (/T\d\d:/.test(String(a)) && /T\d\d:/.test(String(b))) return Math.abs(Date.parse(a) - Date.parse(b)) < 1000;
+  return String(a) === String(b);
+}
+
+/** New last-lift / SRT for an edited total, anchored to the ORIGINAL prediction time */
+function editedTimes(r, newTotal) {
+  const delta = newTotal - (+r.total_min || 0);
+  let ll;
+  if (r.prediction_base_at) ll = addMin(new Date(r.prediction_base_at), newTotal);
+  else if (r.predicted_last_lift_at) ll = addMin(new Date(r.predicted_last_lift_at), delta);
+  else ll = addMin(hmToDate(r.predicted_last_lift_time), Math.round(delta));
+  const srt = roundUpTo15(ll);
+  return { ll, srt, llHM: toHM(ll), srtHM: toHM(srt) };
+}
+
+let EP = null;   // edit-prediction dialog state
+
+function openEditPrediction(r) {
+  EP = { r, w: {} };
+  const madeAt = r.prediction_base_at ? fmtDateTime(r.prediction_base_at)
+    : `${toHM(addMin(hmToDate(r.predicted_last_lift_time), -Math.round(+r.total_min || 0)))} (prediction time)`;
+  const html = `<div class="ep">
+    <div class="cf-note"><i class="ti ti-info-circle"></i><div>Recalculated from the original prediction time <b>${esc(madeAt)}</b> — not from now.
+      Every edit is marked on the record and logged in the audit trail with your ID and reason.</div></div>
+    ${r.actual_last_lift_time ? `<div class="cf-warn"><i class="ti ti-alert-triangle"></i><div>This vessel call is completed. SRT compliance and LL deviation will be re-evaluated against the actual last lift (<b>${esc(r.actual_last_lift_time)}</b>).</div></div>` : ''}
+    <div class="grid g2">
+      <div class="fld"><label class="k-label fld-label" for="e-qc">Last crane (QC) <span class="req">*</span></label><input id="e-qc" /></div>
+      <div class="fld"><label class="k-label fld-label" for="e-cmph">CMPH <span class="req">*</span></label><input id="e-cmph" /></div>
+    </div>
+    <div class="grid g2 wl ep-wl">
+      ${WORKLOAD.map(f => `<div class="fld"><label class="k-label fld-label" for="e-${f.id}">${f.label}</label><input id="e-${f.id}" /></div>`).join('')}
+    </div>
+    <div class="ep-prev" id="e-prev"></div>
+    <div class="fld"><label class="k-label fld-label" for="e-rem">Prediction remarks</label><textarea id="e-rem"></textarea></div>
+    <div class="fld"><label class="k-label fld-label" for="e-reason">Reason for edit <span class="req">* recorded in audit trail</span></label><textarea id="e-reason"></textarea><div class="fld-msg" id="e-reason-msg"></div></div>
+  </div>`;
+  const dlg = openDialog({
+    title: `Edit prediction · ${r.vessel_name}`,
+    width: 640, cls: 'ep-dialog',
+    html,
+    actions: [
+      { text: 'Cancel' },
+      { text: 'Review changes', primary: true, action: () => { reviewEditPrediction(); return false; } }
+    ]
+  });
+  EP.dlg = dlg;
+  const w = EP.w;
+  w.qc = $('#e-qc').kendoDropDownList({
+    dataSource: QC_DB, dataTextField: 'qc', dataValueField: 'qc', optionLabel: 'Select crane…', filter: 'contains', size: 'medium',
+    value: r.qc_number || '',
+    template: q => `<div class="qc-opt"><b>${esc(q.qc)}</b><span>${esc(q.model || '')} · ${esc(q.speed)} m/min</span></div>`,
+    change: () => editPreview()
+  }).data('kendoDropDownList');
+  w.cmph = $('#e-cmph').kendoNumericTextBox({ spinners: false, min: 1, max: 80, step: 1, decimals: 1, format: '#.#', size: 'medium', value: r.cmph != null ? +r.cmph : null,
+    suffixOptions: { template: () => 'moves/hr' }, change: () => editPreview(), spin: () => editPreview() }).data('kendoNumericTextBox');
+  $('#e-cmph').on('input', () => editPreview());
+  WORKLOAD.forEach(f => {
+    w[f.id] = $('#e-' + f.id).kendoNumericTextBox({ spinners: false, min: 0, step: 1, decimals: 0, format: 'n0', size: 'medium', placeholder: '0', value: r[f.id] != null ? +r[f.id] : null,
+      suffixOptions: { template: () => f.unit }, change: () => editPreview(), spin: () => editPreview() }).data('kendoNumericTextBox');
+    $('#e-' + f.id).on('input', () => editPreview());
+  });
+  w.rem = $('#e-rem').kendoTextArea({ rows: 2, maxLength: 500, size: 'medium', value: r.prediction_remarks || '', resize: 'vertical' }).data('kendoTextArea');
+  w.reason = $('#e-reason').kendoTextArea({ rows: 2, maxLength: 500, size: 'medium', resize: 'vertical', placeholder: 'e.g. Wrong QC selected; workload corrected after stowage update' }).data('kendoTextArea');
+  $('#e-reason').on('input', () => setMsg('e-reason', ''));
+  editPreview();
+}
+
+/** Builds the update for the current edit form (null if incomplete) */
+function editBuild() {
+  const { r, w } = EP;
+  const f = { qc: w.qc.value(), cmph: readNum(w.cmph) };
+  WORKLOAD.forEach(x => { f[x.id] = Math.max(0, readNum(w[x.id])); });
+  if (!f.qc || !(f.cmph > 0)) return null;
+  const qc = QC_DB.find(q => q.qc === f.qc);
+  const speed = qc ? qc.speed : (+r.qc_speed || DEFAULT_QC_SPEED);
+  const res = calcPrediction(f, f.cmph, speed);
+  const t = editedTimes(r, res.totalMin);
+  const upd = {
+    qc_number: f.qc, qc_model: qc ? qc.model : (r.qc_model || ''), qc_speed: speed, cmph: +f.cmph,
+    f1: f.f1, f2: f.f2, f3: f.f3, f4: f.f4, f5: f.f5, f6: f.f6, f7: f.f7, f8: f.f8,
+    container_min: res.containerMin, gantry_min: res.gantryMin, buffer_min: res.bufferMin, total_min: res.totalMin,
+    predicted_last_lift_time: t.llHM, suggested_srt: t.srtHM,
+    prediction_remarks: String(w.rem.value() || '').trim()
+  };
+  // keep the full date-time columns in step when the record has them
+  if (r.predicted_last_lift_at || r.prediction_base_at) upd.predicted_last_lift_at = t.ll.toISOString();
+  if (r.suggested_srt_at || r.prediction_base_at) upd.suggested_srt_at = t.srt.toISOString();
+  if (r.actual_last_lift_time) Object.assign(upd, {
+    srt_window_start: toHM(addMin(t.srt, -TARGET.srtWindow)), srt_window_end: t.srtHM,
+    srt_class: classifySRT(t.srtHM, r.actual_last_lift_time), deviation_minutes: circDiff(t.llHM, r.actual_last_lift_time)
+  });
+  const changed = Object.keys(upd).filter(k => !sameVal(r[k], upd[k]));
+  return { upd, changed, t, res };
+}
+
+function editPreview() {
+  if (!EP) return;
+  const box = $('#e-prev');
+  const b = editBuild();
+  if (!b) { box.html('<div class="res-empty sm"><i class="ti ti-hourglass-empty"></i><div>Select a crane and enter CMPH to preview.</div></div>'); return; }
+  const r = EP.r;
+  const chg = (o, n) => o !== n ? 'chg' : '';
+  box.html(`<div class="pred-times">
+      <div class="pt"><span>Predicted last lift</span><b class="t-blue ${chg(r.predicted_last_lift_time, b.t.llHM)}">${b.t.llHM}</b><em>was ${esc(r.predicted_last_lift_time)}</em></div>
+      <div class="pt srt"><span>Recommended SRT</span><b class="${chg(r.suggested_srt, b.t.srtHM)}">${b.t.srtHM}</b><em>was ${esc(r.suggested_srt)}</em></div>
+    </div>
+    <div class="kv"><div class="kv-total"><span>Total operation time</span><b>${b.res.totalMin.toFixed(1)} min <span class="muted">· was ${(+r.total_min || 0).toFixed(1)}</span></b></div>
+    ${r.actual_last_lift_time ? `<div><span>SRT compliance (re-evaluated)</span><b>${badge(r.srt_class, r.srt_class === 'GOOD' ? 'GOOD' : 'NQ')} → ${badge(b.upd.srt_class, b.upd.srt_class === 'GOOD' ? 'GOOD' : 'NQ')}</b></div>` : ''}</div>`);
+}
+
+function reviewEditPrediction() {
+  const r = EP.r;
+  const b = editBuild();
+  if (!b) { toast('Select a crane and enter CMPH.', 'warning'); return; }
+  if (!b.changed.length) { toast('Nothing has changed — there is no edit to save.', 'info'); return; }
+  const reason = String(EP.w.reason.value() || '').trim();
+  if (!reason) { setMsg('e-reason', 'A reason is required for every edit', 'error'); toast('Please enter the reason for this edit.', 'warning'); EP.w.reason.focus(); return; }
+  const shown = DIFF_SHOW.filter(k => b.changed.includes(k));
+  openDialog({
+    title: 'Confirm prediction edit',
+    width: 540,
+    html: `<div class="dlg-sum">
+      <div class="dlg-vessel"><i class="ti ti-ship"></i>${esc(r.vessel_name)} <span>· ${esc(r.vessel_reference)}</span></div>
+      <p class="dlg-p muted">These changes will be saved and logged in the audit trail. Tap <b>Amend</b> to go back.</p>
+      ${diffTable(shown.map(k => [k, r[k], b.upd[k]]))}
+      ${cfSec('Audit entry')}
+      ${cfKV('Edited by', esc(S.operator))}
+      ${cfKV('Edit no.', String((+r.prediction_edit_count || 0) + 1))}
+      ${cfRem(reason)}
+    </div>`,
+    actions: [
+      { text: 'Amend' },
+      { text: 'Save edit', primary: true, action: () => { saveEditPrediction(r, b.upd, reason); return true; } }
+    ]
+  });
+}
+
+function diffTable(rows) {
+  return `<div class="table-wrap"><table class="k-table k-table-md diff">
+    <thead class="k-table-thead"><tr class="k-table-row"><th class="k-table-th">Field</th><th class="k-table-th">Before</th><th class="k-table-th">After</th></tr></thead>
+    <tbody class="k-table-tbody">${rows.map(([k, o, n]) => `<tr class="k-table-row"><td class="k-table-td">${esc(AUDIT_LABELS[k] || k)}</td><td class="k-table-td old">${esc(auditVal(k, o))}</td><td class="k-table-td new">${esc(auditVal(k, n))}</td></tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+async function saveEditPrediction(r, upd, reason) {
+  const payload = Object.assign({}, upd, { edit_reason_input: reason, edit_by_input: S.operator });
+  try {
+    const { error } = await window.sb.from('vsr_records').update(payload).eq('id', r.id);
+    if (error) throw error;
+  } catch (e) {
+    const missing = e && (e.code === 'PGRST204' || /column|schema cache/i.test(e.message || ''));
+    if (missing) openDialog({
+      title: 'Audit control not set up', width: 440,
+      html: `<div class="cf-warn"><i class="ti ti-alert-triangle"></i><div>The edit was <b>not saved</b>. Run <b>migration_prediction_audit.sql</b> in Supabase → SQL Editor once, then try again.</div></div>`
+    });
+    else toast('Edit failed: ' + (e.message || e), 'error');
+    return;
+  }
+  if (EP && EP.dlg) EP.dlg.close();
+  EP = null;
+  toast(`Prediction updated · ${r.vessel_name} — logged in audit trail`, 'success');
+  await loadRecords(true);
+  refreshCurrentLists();
+  const fresh = S.records.find(x => x.id === r.id);
+  if (fresh) openRecord(fresh);
+}
+
+async function openAuditTrail(r) {
+  let rows = [], err = null;
+  try {
+    const { data, error } = await window.sb.from('vsr_audit_log').select('*').eq('record_id', r.id).order('edited_at', { ascending: false });
+    if (error) throw error;
+    rows = data || [];
+  } catch (e) { err = e; }
+  const n = rows.length;
+  const body = err
+    ? `<div class="cf-warn"><i class="ti ti-alert-triangle"></i><div>Couldn't load the audit trail: ${esc(err.message || err)}<br>Run migration_prediction_audit.sql in Supabase if you haven't yet.</div></div>`
+    : !n ? emptyState('ti-history', 'No edits logged', 'This prediction has not been edited.')
+    : rows.map((a, i) => {
+        const ch = a.changes || {};
+        const twin = { predicted_last_lift_at: 'predicted_last_lift_time', suggested_srt_at: 'suggested_srt' };
+        const keys = Object.keys(ch).filter(k => !(twin[k] && ch[twin[k]]));   // date-time shown via its HH:mm twin
+        return `<div class="audit-entry">
+          <div class="ae-h"><b>Edit #${n - i}</b><span>${esc(a.edited_by || '')} · ${esc(fmtDateTime(a.edited_at))}</span></div>
+          <div class="d-rem"><i class="ti ti-message-2"></i>${esc(a.reason || '—')}</div>
+          ${diffTable(keys.map(k => [k, ch[k] && ch[k].old, ch[k] && ch[k].new]))}
+        </div>`;
+      }).join('');
+  openDialog({
+    title: `Audit trail · ${r.vessel_name}`, width: 600,
+    html: `<p class="dlg-p muted">${esc(r.vessel_reference)} · original prediction by ${esc(r.prediction_operator || '—')}. Entries are written by the database and cannot be changed from the app.</p>${body}`
+  });
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────
@@ -1410,6 +1764,9 @@ function downloadReport() {
     ['container_min', 'Container Work Time (min)'], ['gantry_min', 'Gantry Travel Time (min)'], ['buffer_min', 'Breakdown Buffer (min)'],
     ['total_min', 'Total Operation Time (min)'], ['predicted_last_lift_time', 'Predicted Last Lift'], ['suggested_srt', 'Suggested SRT'],
     ['prediction_remarks', 'Prediction Remarks'], ['prediction_operator', 'Prediction Operator'],
+    ['prediction_edited', 'Prediction Edited', v => v ? 'YES' : 'NO'], ['prediction_edit_count', 'Prediction Edit Count', v => v || 0],
+    ['prediction_last_edited_by', 'Prediction Last Edited By'], ['prediction_last_edited_at', 'Prediction Last Edited At', v => v ? new Date(v).toLocaleString('en-GB') : ''],
+    ['prediction_edit_reason', 'Prediction Last Edit Reason'],
     ['actual_last_lift_time', 'Actual Last Lift'], ['actual_pilot_onboard_time', 'Pilot Onboard'], ['actual_srt_time', 'Actual SRT'],
     ['last_line_time', 'Last Line Time'], ['srt_window_start', 'SRT Window Start'], ['srt_window_end', 'SRT Window End'],
     ['srt_class', 'SRT Class'], ['deviation_minutes', 'LL Deviation (min)'], ['quick_sail_minutes', 'Quick Sail (min)'],

@@ -504,3 +504,33 @@ button { font-family: inherit; }
   .rec-meta .ti:not(:first-child) { margin-left: 6px; }
 }
 input::placeholder, textarea::placeholder { text-transform: none; }
+
+/* ── Confirmation popups, vessel search, edit prediction & audit ── */
+.cf-sec { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 12px 0 2px; }
+.dlg-kv .sm, .muted.sm { font-size: 11.5px; }
+.cf-note, .cf-warn, .audit-note { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; margin: 10px 0 4px; }
+.cf-note { background: color-mix(in srgb, var(--brand) 9%, var(--surface)); color: var(--brand-ink); }
+.cf-warn, .audit-note { background: var(--warn-bg); color: #7A4A0B; }
+.cf-note .ti, .cf-warn .ti, .audit-note .ti { font-size: 17px; flex-shrink: 0; margin-top: 1px; }
+.d-rem.muted { color: var(--muted); }
+.pick-fld { margin-bottom: 14px; }
+.pick-fld .k-dropdownlist { width: 100%; }
+.pill-edit { background: var(--warn-bg); color: #8A5300; }
+.ep { display: flex; flex-direction: column; gap: 12px; }
+.ep .cf-note, .ep .cf-warn { margin: 0; }
+.ep .grid { gap: 10px 12px; }
+.ep-wl .fld-label { font-size: 12px; }
+.ep-prev { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--surface-2); }
+.ep-prev .pred-times { margin-bottom: 8px; }
+.ep-prev b.chg { color: var(--accent) !important; }
+.ep-prev .kv > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12.5px; padding: 4px 0; }
+.diff { width: 100%; font-size: 12.5px; margin-top: 4px; }
+.diff td.old { color: var(--bad-ink); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 45%, transparent); font-family: var(--mono); }
+.diff td.new { color: var(--good-ink); font-weight: 700; font-family: var(--mono); }
+.diff td, .diff th { white-space: normal; vertical-align: top; }
+.audit-entry { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; }
+.ae-h { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 13px; margin-bottom: 4px; }
+.ae-h span { color: var(--muted); font-size: 12px; }
+@media (max-width: 640px) { .ep .grid.g2 { grid-template-columns: 1fr 1fr; } }
+.dlg-sum .table-wrap, .audit-entry .table-wrap { margin: 4px 0 0; }
+.ep .k-numerictextbox, .ep .k-dropdownlist { width: 100%; }

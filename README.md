@@ -45,5 +45,18 @@ Poka-yoke: First Line ≤ RTW ≤ First Lift, and Last Line ≥ Actual Last Lift
 Times are 24-hour HH:mm; a sequence that crosses midnight (e.g. 23:50 → 00:05) is treated as
 +15 min, not as an error. A later time that is earlier by less than 12 hours is flagged.
 
+## Workflow
+Each phase ends with **Calculate …** → a confirmation popup of all details → **Amend** (close and fix) or
+**Calculate & save**. Prediction and Departure have a searchable vessel picker (type part of the name or reference).
+
+## Edit saved prediction (audit-controlled)
+Records → open a vessel → **Edit prediction**. The new last lift / SRT is recalculated from the original prediction
+time (not from now); completed calls also get SRT compliance and LL deviation re-evaluated. A reason is mandatory,
+and a before/after table is shown before saving. Edited records show an **Edited ×n** pill and an **Audit trail**.
+
 ## Database
-No schema changes — same `vsr_records` and `qc_database` tables and columns as before.
+- `vsr_records`, `qc_database` — as before.
+- `migration_prediction_audit.sql` (run once in Supabase → SQL Editor) — adds edit-tracking columns, the read-only
+  `vsr_audit_log` table, and a trigger that refuses an edit without a reason + editor ID and logs old → new values
+  in the same transaction. **Edit prediction will not save until this has been run.**
+- `cleanup_incomplete_until_2026-09-28.sql` — one-off: backs up and removes incomplete records created up to 28 Sep 2026.
