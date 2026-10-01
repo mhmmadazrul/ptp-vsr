@@ -2,13 +2,29 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0B3D6E">
   <title>PTP Vessel Status Report</title>
+
+  <!-- Kendo UI Core (Apache-2.0, free) + Default theme -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@progress/kendo-theme-default@14.5.0/dist/default-main.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div id="root"><p style="padding:2rem;font-family:sans-serif;color:#999">Starting...</p></div>
+  <div id="root">
+    <div class="boot">
+      <div class="boot-logo"><i class="ti ti-ship"></i></div>
+      <div class="boot-text">Loading Vessel Status Report…</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+  <!-- Kendo UI Core 2026.3.812 — only the modules this app uses (see scripts/build-kendo.sh) -->
+  <script src="vendor/kendo-ui-core/kendo.vsr.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script src="config.js"></script>
