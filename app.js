@@ -633,6 +633,7 @@ function renderRoot() {
     </nav>
   </header>
   <main id="view" class="view" tabindex="-1"></main>
+  <footer class="app-footer">Built by <a href="https://www.linkedin.com/in/mhmmadazrul/" target="_blank" rel="noopener noreferrer">Muhammad Azrul</a></footer>
   <div id="notify"></div>`;
 
   const mobile = window.matchMedia('(max-width: 760px)').matches;
@@ -742,6 +743,7 @@ function renderLogin(root) {
         <li><i class="ti ti-sailboat"></i>Departure · Quick Sail ≤ ${TARGET.qsail} min</li>
       </ul>
     </div>
+    <footer class="app-footer on-dark">Built by <a href="https://www.linkedin.com/in/mhmmadazrul/" target="_blank" rel="noopener noreferrer">Muhammad Azrul</a></footer>
   </div>`;
   const tb = $('#op-inp').kendoTextBox({ placeholder: 'e.g. 012345', size: 'large', prefixOptions: { icon: 'user' } }).data('kendoTextBox');
   $('#op-inp').css('text-transform', 'uppercase');
